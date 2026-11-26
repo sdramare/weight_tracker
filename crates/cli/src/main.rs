@@ -1,9 +1,15 @@
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: blt_unlock [--scale] [--seconds <1-60>]\n\
+const USAGE: &str = "Usage: blt_unlock [--scale | --weight] [--seconds <1-60>]\n\
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
+    Use --weight with S200_BINDKEY set to wait for a stabilized weight.\n\
     The discovery timeout defaults to 30 seconds.";
 const DEFAULT_SECONDS: u64 = 30;
+
+enum Command {
+    Services,
+    Weight,
+}
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1).peekable();
@@ -18,7 +24,7 @@ fn main() -> ExitCode {
     }
 
     let mut seconds = None;
-    let mut scale_flag_seen = false;
+    let mut command = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--seconds") if seconds.is_none() => {
@@ -30,12 +36,16 @@ fn main() -> ExitCode {
                     return usage_error();
                 }
             }
-            Some("--scale") if !scale_flag_seen => scale_flag_seen = true,
+            Some("--scale") if command.is_none() => command = Some(Command::Services),
+            Some("--weight") if command.is_none() => command = Some(Command::Weight),
             _ => return usage_error(),
         }
     }
 
-    run(seconds.unwrap_or(DEFAULT_SECONDS))
+    run(
+        seconds.unwrap_or(DEFAULT_SECONDS),
+        command.unwrap_or(Command::Services),
+    )
 }
 
 fn usage_error() -> ExitCode {
@@ -44,16 +54,23 @@ fn usage_error() -> ExitCode {
 }
 
 #[cfg(windows)]
-fn run(seconds: u64) -> ExitCode {
+fn run(seconds: u64, command: Command) -> ExitCode {
     use std::time::Duration;
 
-    println!(
-        "Looking for a Xiaomi Smart Scale S200 for up to {seconds} seconds. Step on the scale to wake it."
-    );
-    match show_connection(Duration::from_secs(seconds)) {
+    let duration = Duration::from_secs(seconds);
+    let (result, error_label) = match command {
+        Command::Services => {
+            println!(
+                "Looking for a Xiaomi Smart Scale S200 for up to {seconds} seconds. Step on the scale to wake it."
+            );
+            (show_connection(duration), "Scale connection failed")
+        }
+        Command::Weight => (show_weight(duration), "Scale weight unavailable"),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Scale connection failed: {error}");
+            eprintln!("{error_label}: {error}");
             ExitCode::FAILURE
         }
     }
@@ -77,8 +94,41 @@ fn show_connection(duration: std::time::Duration) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
+    use std::io;
+    use std::ops::ControlFlow;
+
+    let key = xiaomi_s200::ScaleBindKey::from_environment()?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Set S200_BINDKEY to the scale's MiBeacon bind key.",
+        )
+    })?;
+    println!(
+        "Listening for weight for up to {} seconds. Step on the scale and wait for the reading to settle.",
+        duration.as_secs()
+    );
+    let mut reading = None;
+    xiaomi_s200::discover_scales_with_weight(duration, &key, |scale| {
+        if let Some(weight) = scale.weight() {
+            reading = Some((scale.address(), weight));
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })?;
+    let (address, weight) = reading.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "No authenticated weight arrived. Check the bind key and weigh again.",
+        )
+    })?;
+    println!("{address}  {weight}");
+    Ok(())
+}
+
 #[cfg(not(windows))]
-fn run(_seconds: u64) -> ExitCode {
+fn run(_seconds: u64, _command: Command) -> ExitCode {
     eprintln!("Connecting to the scale requires Windows 10 or 11.");
     ExitCode::FAILURE
 }

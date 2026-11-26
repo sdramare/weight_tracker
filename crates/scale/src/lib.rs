@@ -1,9 +1,10 @@
-//! Discovery and GATT service inspection for the Xiaomi Smart Scale S200 on Windows.
+//! Discovery, weight readings, and GATT service inspection for the Xiaomi Smart Scale S200.
 
 #![cfg(windows)]
 
 mod discovery;
 mod types;
+mod weight;
 
 use std::io;
 use std::marker::PhantomData;
@@ -15,7 +16,9 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatu
 use windows::Devices::Bluetooth::{BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
-pub use types::{BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength};
+pub use types::{BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight};
+pub use weight::ScaleBindKey;
+use weight::WeightDecoder;
 
 pub const MODEL_NAME: ScaleName<'static> = ScaleName("Xiaomi Smart Scale S200");
 
@@ -26,6 +29,7 @@ pub struct Scale {
     name: Option<String>,
     signal_strength: SignalStrength,
     connectable: bool,
+    weight: Option<Weight>,
 }
 
 impl Scale {
@@ -44,6 +48,11 @@ impl Scale {
     pub fn is_connectable(&self) -> bool {
         self.connectable
     }
+
+    /// The latest stabilized weight received for this scale during the scan.
+    pub fn weight(&self) -> Option<Weight> {
+        self.weight
+    }
 }
 
 /// Reports each recognized scale and subsequent changes to its advertisement data.
@@ -53,7 +62,17 @@ pub fn discover_scales(
     on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
-    discovery::discover(duration, on_scale)
+    discovery::discover(duration, None, on_scale)
+}
+
+/// Discovers scales and reports weights authenticated with the supplied MiBeacon key.
+pub fn discover_scales_with_weight(
+    duration: Duration,
+    key: &ScaleBindKey,
+    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+) -> io::Result<()> {
+    let _apartment = Apartment::initialize()?;
+    discovery::discover(duration, Some(WeightDecoder::new(key)), on_scale)
 }
 
 /// Waits for the first recognized scale that advertises a connection.

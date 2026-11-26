@@ -33,6 +33,16 @@ impl fmt::Display for SignalStrength {
     }
 }
 
+/// A stabilized weight transmitted by the S200, stored in hundredths of a kilogram.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Weight(pub(super) u32);
+
+impl fmt::Display for Weight {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}.{:02} kg", self.0 / 100, self.0 % 100)
+    }
+}
+
 /// The 128-bit UUID of a Bluetooth GATT service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GattServiceUuid(pub(super) GUID);

@@ -6,7 +6,9 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
-use xiaomi_s200::{BluetoothAddress, MODEL_NAME, Scale, discover_scales};
+use xiaomi_s200::{
+    BluetoothAddress, MODEL_NAME, Scale, ScaleBindKey, discover_scales, discover_scales_with_weight,
+};
 
 const SCAN_DURATION: Duration = Duration::from_secs(30);
 const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 243);
@@ -43,6 +45,7 @@ enum ScanEvent {
 struct ScaleApp {
     scales: BTreeMap<BluetoothAddress, Scale>,
     status: ScanStatus,
+    weight_hint: Option<&'static str>,
 }
 
 impl ScaleApp {
@@ -54,6 +57,7 @@ impl ScaleApp {
         let mut app = Self {
             scales: BTreeMap::new(),
             status: ScanStatus::Complete,
+            weight_hint: None,
         };
         app.start_scan(context);
         app
@@ -63,16 +67,34 @@ impl ScaleApp {
         let (sender, receiver) = mpsc::channel();
         let context = context.clone();
         self.scales.clear();
+        let key = match ScaleBindKey::from_environment() {
+            Ok(Some(key)) => {
+                self.weight_hint = None;
+                Some(key)
+            }
+            Ok(None) => {
+                self.weight_hint = Some("Set S200_BINDKEY before launching to show weight.");
+                None
+            }
+            Err(_) => {
+                self.weight_hint = Some("S200_BINDKEY must contain 32 hexadecimal digits.");
+                None
+            }
+        };
         let worker = thread::Builder::new()
             .name("s200-discovery".into())
             .spawn(move || {
-                let result = discover_scales(SCAN_DURATION, |scale| {
+                let on_scale = |scale: &Scale| {
                     if sender.send(ScanEvent::Scale(scale.clone())).is_err() {
                         return ControlFlow::Break(());
                     }
                     context.request_repaint();
                     ControlFlow::Continue(())
-                });
+                };
+                let result = match key {
+                    Some(key) => discover_scales_with_weight(SCAN_DURATION, &key, on_scale),
+                    None => discover_scales(SCAN_DURATION, on_scale),
+                };
                 let _ = sender.send(ScanEvent::Finished(result));
                 context.request_repaint();
             });
@@ -115,7 +137,12 @@ impl ScaleApp {
             ScanStatus::Scanning(_) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Scanning for 30 seconds. Step on the scale to wake it.");
+                    let message = if self.weight_hint.is_none() {
+                        "Scanning for 30 seconds. Step on the scale and wait for the reading to settle."
+                    } else {
+                        "Scanning for 30 seconds. Step on the scale to wake it."
+                    };
+                    ui.label(message);
                 });
             }
             ScanStatus::Complete if self.scales.is_empty() => {
@@ -125,6 +152,13 @@ impl ScaleApp {
                 let count = self.scales.len();
                 let label = if count == 1 { "scale" } else { "scales" };
                 ui.label(format!("Scan complete. {count} {label} found."));
+                if self.weight_hint.is_none()
+                    && self.scales.values().all(|scale| scale.weight().is_none())
+                {
+                    ui.label(
+                        "No authenticated weight arrived. Check the bind key and weigh again.",
+                    );
+                }
             }
             ScanStatus::Failed(message) => {
                 ui.label(
@@ -160,6 +194,9 @@ impl eframe::App for ScaleApp {
                 });
                 ui.add_space(15.0);
                 self.status_line(ui);
+                if let Some(hint) = self.weight_hint {
+                    ui.label(RichText::new(hint).color(MUTED));
+                }
                 ui.add_space(12.0);
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for scale in self.scales.values() {
@@ -186,6 +223,13 @@ fn scale_row(ui: &mut egui::Ui, scale: &Scale) {
                             .monospace()
                             .color(MUTED),
                     );
+                    if let Some(weight) = scale.weight() {
+                        ui.label(
+                            RichText::new(format!("Last weight  {weight}"))
+                                .strong()
+                                .color(ACCENT),
+                        );
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.vertical(|ui| {

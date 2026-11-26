@@ -178,6 +178,35 @@
       </figure>
     </section>
 
+    <section class="panel" aria-labelledby="weight-heading">
+      <h2 id="weight-heading">How a weight reaches the app</h2>
+      <figure>
+        <div class="diagram" role="region" aria-label="Scrollable weight reading diagram" tabindex="0">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="weight-title weight-description">
+            <title id="weight-title">Authenticated weight reading</title>
+            <desc id="weight-description">The S200 broadcasts its stabilized measurement. The shared library authenticates and decrypts the MiBeacon packet with the scale’s bind key. The desktop and terminal apps display the weight in kilograms.</desc>
+            <defs>
+              <marker id="weight-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+                <path d="M0 0L9 4L0 8Z" fill="#116650"/>
+              </marker>
+            </defs>
+            <rect class="node" x="20" y="22" width="220" height="64" rx="8"/>
+            <text class="node-title" x="130" y="49">Step on the scale</text>
+            <text class="node-detail" x="130" y="69">Wait for the weight to settle</text>
+            <path class="arrow" d="M240 54H299" marker-end="url(#weight-arrow)"/>
+            <rect class="node" x="304" y="22" width="232" height="64" rx="8"/>
+            <text class="node-title" x="420" y="49">Verify the broadcast</text>
+            <text class="node-detail" x="420" y="69">MiBeacon packet and bind key</text>
+            <path class="arrow" d="M536 54H595" marker-end="url(#weight-arrow)"/>
+            <rect class="node-accent" x="600" y="22" width="220" height="64" rx="8"/>
+            <text class="node-title node-inverse" x="710" y="49">Display the weight</text>
+            <text class="node-detail node-inverse" x="710" y="69">Kilograms in the desktop or CLI</text>
+          </svg>
+        </div>
+        <figcaption>Set <code>S200_BINDKEY</code> before you launch either app. Use <code>cargo run -- --weight</code> for a single terminal reading. See the <a href="../README.md#read-a-weight">README</a> for setup.</figcaption>
+      </figure>
+    </section>
+
     <section class="panel" aria-labelledby="help-heading">
       <h2 id="help-heading">If the connection fails</h2>
       <div class="help">

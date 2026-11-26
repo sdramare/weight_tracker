@@ -13,7 +13,7 @@ use windows::Devices::Bluetooth::BluetoothAddressType;
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::DataReader;
 
-use super::{BluetoothAddress, Scale, SignalStrength};
+use super::{BluetoothAddress, Scale, SignalStrength, Weight, WeightDecoder};
 
 struct Advertisement {
     address: BluetoothAddress,
@@ -22,6 +22,7 @@ struct Advertisement {
     signal_strength: SignalStrength,
     connectable: bool,
     address_type: Option<BluetoothAddressType>,
+    weight: Option<Weight>,
 }
 
 struct Candidate {
@@ -41,7 +42,7 @@ struct Watcher {
 }
 
 impl Watcher {
-    fn start(sender: Sender<Event>) -> io::Result<Self> {
+    fn start(sender: Sender<Event>, decoder: Option<WeightDecoder>) -> io::Result<Self> {
         let mut watcher = Self {
             inner: BluetoothLEAdvertisementWatcher::new()?,
             received: None,
@@ -50,6 +51,9 @@ impl Watcher {
         watcher
             .inner
             .SetScanningMode(BluetoothLEScanningMode::Active)?;
+        if decoder.is_some() {
+            let _ = watcher.inner.SetAllowExtendedAdvertisements(true);
+        }
 
         type ReceivedHandler = TypedEventHandler<
             BluetoothLEAdvertisementWatcher,
@@ -65,7 +69,7 @@ impl Watcher {
                 let Some(args) = args.as_ref() else {
                     return Ok(());
                 };
-                if let Ok(Some(advertisement)) = read_advertisement(args) {
+                if let Ok(Some(advertisement)) = read_advertisement(args, decoder.as_ref()) {
                     let _ = received_sender.send(Event::Advertisement(advertisement));
                 }
                 Ok(())
@@ -99,10 +103,11 @@ impl Drop for Watcher {
 
 pub(super) fn discover(
     duration: Duration,
+    decoder: Option<WeightDecoder>,
     on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let (sender, receiver) = mpsc::channel();
-    let watcher = Watcher::start(sender)?;
+    let watcher = Watcher::start(sender, decoder)?;
     let result = wait_for_scales(duration, receiver, on_scale);
     result.and(watcher.stop())
 }
@@ -130,6 +135,7 @@ fn wait_for_scales(
                                 name: None,
                                 signal_strength: advertisement.signal_strength,
                                 connectable: false,
+                                weight: None,
                             },
                         });
                 if candidate.update(advertisement) && on_scale(&candidate.scale).is_break() {
@@ -152,6 +158,7 @@ impl Candidate {
         let scale = &mut self.scale;
         let address_type = advertisement.address_type.or(scale.address_type);
         let connectable = scale.connectable || advertisement.connectable;
+        let weight = advertisement.weight.or(scale.weight);
         let name_changed = advertisement
             .name
             .as_ref()
@@ -160,12 +167,14 @@ impl Candidate {
             || scale.address_type != address_type
             || scale.signal_strength != advertisement.signal_strength
             || scale.connectable != connectable
+            || scale.weight != weight
             || name_changed;
 
         self.is_s200 |= advertisement.is_s200;
         scale.address_type = address_type;
         scale.signal_strength = advertisement.signal_strength;
         scale.connectable = connectable;
+        scale.weight = weight;
         if name_changed {
             scale.name = advertisement.name;
         }
@@ -189,6 +198,7 @@ fn stopped_error(code: i32) -> io::Error {
 
 fn read_advertisement(
     args: &BluetoothLEAdvertisementReceivedEventArgs,
+    decoder: Option<&WeightDecoder>,
 ) -> windows::core::Result<Option<Advertisement>> {
     let address = args.BluetoothAddress()?;
     let signal_dbm = args.RawSignalStrengthInDBm()?;
@@ -196,6 +206,7 @@ fn read_advertisement(
     if address == 0 || signal_dbm == -127 {
         return Ok(None);
     }
+    let address = BluetoothAddress(address);
 
     let payload = args.Advertisement().ok();
     let name = payload
@@ -203,11 +214,15 @@ fn read_advertisement(
         .and_then(|payload| payload.LocalName().ok())
         .map(|name| name.to_string_lossy())
         .filter(|name| !name.trim().is_empty());
-    let is_s200 = name.as_ref().is_some_and(|name| {
+    let name_matches = name.as_ref().is_some_and(|name| {
         let normalized = name.to_ascii_lowercase();
         normalized.starts_with("xiaomi scale s200")
             || normalized.starts_with("xiaomi smart scale s200")
-    }) || payload.as_ref().is_some_and(is_s200_payload);
+    });
+    let (service_matches, weight) = payload
+        .as_ref()
+        .map(|payload| inspect_service_data(payload, address, decoder))
+        .unwrap_or_default();
     let connectable = match args.AdvertisementType() {
         Ok(
             BluetoothLEAdvertisementType::ConnectableUndirected
@@ -224,31 +239,52 @@ fn read_advertisement(
     });
 
     Ok(Some(Advertisement {
-        address: BluetoothAddress(address),
-        is_s200,
+        address,
+        is_s200: name_matches || service_matches,
         name,
         signal_strength: SignalStrength(signal_dbm),
         connectable,
         address_type,
+        weight,
     }))
 }
 
-fn is_s200_payload(payload: &BluetoothLEAdvertisement) -> bool {
+fn inspect_service_data(
+    payload: &BluetoothLEAdvertisement,
+    address: BluetoothAddress,
+    decoder: Option<&WeightDecoder>,
+) -> (bool, Option<Weight>) {
     // AD type 0x16 carries 16-bit service data, including Xiaomi MiBeacon.
     let Ok(sections) = payload.GetSectionsByType(0x16) else {
-        return false;
+        return (false, None);
     };
-    sections.into_iter().any(|section| {
-        section
+    let mut detected = false;
+    for section in sections {
+        let Ok(reader) = section
             .Data()
             .and_then(|buffer| DataReader::FromBuffer(&buffer))
-            .and_then(|reader| {
-                let mut header = [0; 6];
-                reader.ReadBytes(&mut header)?;
-                Ok(is_s200_service_data(&header))
-            })
-            .unwrap_or(false)
-    })
+        else {
+            continue;
+        };
+        let mut header = [0; 6];
+        if reader.ReadBytes(&mut header).is_err() || !is_s200_service_data(&header) {
+            continue;
+        }
+        detected = true;
+        let Some(decoder) = decoder else { break };
+        let Ok(length) = reader.UnconsumedBufferLength() else {
+            continue;
+        };
+        let mut data = header.to_vec();
+        data.resize(header.len() + length as usize, 0);
+        if reader.ReadBytes(&mut data[header.len()..]).is_err() {
+            continue;
+        }
+        if let Some(weight) = decoder.decode(address, &data) {
+            return (true, Some(weight));
+        }
+    }
+    (detected, None)
 }
 
 fn is_s200_service_data(data: &[u8]) -> bool {
@@ -261,7 +297,7 @@ fn is_s200_service_data(data: &[u8]) -> bool {
 mod tests {
     use super::{
         Advertisement, BluetoothAddress, BluetoothAddressType, ControlFlow, Duration, Event,
-        SignalStrength, is_s200_service_data, mpsc, wait_for_scales,
+        SignalStrength, Weight, is_s200_service_data, mpsc, wait_for_scales,
     };
 
     #[test]
@@ -278,12 +314,13 @@ mod tests {
     fn reports_each_scale_and_combines_advertisements_by_address() {
         let (sender, receiver) = mpsc::channel();
         let address_type = Some(BluetoothAddressType::Public);
-        for (address, is_s200, connectable) in [
-            (12, true, false),
-            (34, false, true),
-            (12, false, true),
-            (12, false, true),
-            (56, true, false),
+        for (address, is_s200, connectable, weight) in [
+            (12, true, false, None),
+            (34, false, true, None),
+            (12, false, true, None),
+            (12, false, true, Some(Weight(7255))),
+            (12, false, true, None),
+            (56, true, false, None),
         ] {
             sender
                 .send(Event::Advertisement(Advertisement {
@@ -293,6 +330,7 @@ mod tests {
                     signal_strength: SignalStrength(-60),
                     connectable,
                     address_type,
+                    weight,
                 }))
                 .unwrap();
         }
@@ -303,6 +341,7 @@ mod tests {
                 scale.address(),
                 scale.is_connectable(),
                 scale.name().to_string(),
+                scale.weight(),
             ));
             if scale.address() == BluetoothAddress(56) {
                 ControlFlow::Break(())
@@ -317,17 +356,26 @@ mod tests {
                 (
                     BluetoothAddress(12),
                     false,
-                    "Xiaomi Scale S200 12".to_owned()
+                    "Xiaomi Scale S200 12".to_owned(),
+                    None,
                 ),
                 (
                     BluetoothAddress(12),
                     true,
-                    "Xiaomi Scale S200 12".to_owned()
+                    "Xiaomi Scale S200 12".to_owned(),
+                    None,
+                ),
+                (
+                    BluetoothAddress(12),
+                    true,
+                    "Xiaomi Scale S200 12".to_owned(),
+                    Some(Weight(7255)),
                 ),
                 (
                     BluetoothAddress(56),
                     false,
-                    "Xiaomi Scale S200 56".to_owned()
+                    "Xiaomi Scale S200 56".to_owned(),
+                    None,
                 ),
             ]
         );

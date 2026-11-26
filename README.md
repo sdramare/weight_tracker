@@ -27,6 +27,26 @@ cargo run -- --seconds 45
 
 The second command extends the default 30-second discovery timeout. If the CLI sees the scale but cannot connect, close Xiaomi Home if it is connected to the scale, then wake the scale again.
 
+## Read a weight
+
+Use the 32-digit hexadecimal MiBeacon bind key for your scale. [Home Assistant’s Xiaomi BLE guide](https://www.home-assistant.io/integrations/xiaomi_ble/#encryption) describes how to obtain it for a device bound to your Xiaomi account.
+
+In PowerShell, enter the key and launch the desktop app in the same session.
+
+```powershell
+$key = Read-Host 'S200 bind key' -AsSecureString
+$env:S200_BINDKEY = [System.Net.NetworkCredential]::new('', $key).Password
+cargo run -p blt_unlock_gui
+```
+
+Step on the scale during a scan and wait for its display to settle. The desktop app shows the latest stabilized weight in kilograms. Weight display requires the scale to transmit its measurement in a MiBeacon v4 or v5 advertisement.
+
+With the same environment variable set, the CLI prints the first authenticated reading it receives.
+
+```powershell
+cargo run -- --weight --seconds 45
+```
+
 ## Build and test
 
 ```powershell

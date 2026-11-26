@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+aes = "0.8.4"
+ccm = { version = "0.5.0", default-features = false }
 windows = { version = "0.62.2", features = [
     "Devices_Bluetooth_Advertisement",
     "Devices_Bluetooth_GenericAttributeProfile",
