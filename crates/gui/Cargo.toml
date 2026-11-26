@@ -10,7 +10,7 @@ egui_plot = "0.33.0"
 raw-window-handle = "0.6.2"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 tray-icon = { version = "0.21.2", default-features = false }
-windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 xiaomi-s200 = { path = "../scale" }
 
 [build-dependencies]

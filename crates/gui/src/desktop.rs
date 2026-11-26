@@ -73,7 +73,7 @@ struct ScaleApp {
     history: Vec<WeightEntry>,
     history_error: Option<String>,
     group_by: weight_plot::GroupBy,
-    tray: Option<tray_icon::TrayIcon>,
+    _tray: Option<tray::Tray>,
     tray_error: Option<String>,
 }
 
@@ -127,7 +127,7 @@ impl ScaleApp {
             history: Vec::new(),
             history_error: None,
             group_by: weight_plot::GroupBy::Day,
-            tray,
+            _tray: tray,
             tray_error,
         }
     }
@@ -321,17 +321,8 @@ impl eframe::App for ScaleApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(24))
             .show(context, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.heading(RichText::new("Weight monitor").size(28.0));
-                        ui.label(RichText::new(MODEL_NAME.to_string()).color(MUTED));
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.tray.is_some() && ui.button("Hide to tray").clicked() {
-                            context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                        }
-                    });
-                });
+                ui.heading(RichText::new("Weight monitor").size(28.0));
+                ui.label(RichText::new(MODEL_NAME.to_string()).color(MUTED));
                 ui.add_space(15.0);
                 self.status_line(ui);
                 if let Some(hint) = &self.weight_hint {
