@@ -57,13 +57,13 @@ Step on the scale during the scan. This read-only command reports the advertised
 
 A capture of first-time registration on the S200 `ms113` shows a key exchange and a Xiaomi Cloud certificate. The capture documents this firmware variant and provides a starting point for a Rust setup flow. [S200 registration capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#registration-for-completeness-not-needed-in-practice)
 
-Send the bundled test certificate to an unregistered S200 `ms113` while it is requesting setup.
+Try local Standard Auth setup on an unregistered S200 `ms113` while it is requesting setup.
 
 ```powershell
 cargo run -- --setup-test-cert --seconds 30
 ```
 
-The CLI sends the self-signed DER certificate over the scale’s Standard Auth characteristic and listens for the scale’s reply. A transfer acknowledgment confirms delivery only. Full registration also includes a key exchange and device ID, so the experiment may end without a registration verdict.
+The CLI requests setup information, exchanges P-256 public keys, and sends an encrypted local test device ID followed by the bundled self-signed certificate. A transfer acknowledgment confirms delivery only. The scale reports registration on its control characteristic. Candidate credentials are saved under `target/s200-setup-test` before the registration request so they remain available if the scale completes setup and disconnects.
 
 ## Build and test
 

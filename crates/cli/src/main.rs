@@ -4,7 +4,7 @@ const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --se
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
     Use --weight with S200_BINDKEY set to wait for a stabilized weight.\n\
     Use --setup-info to inspect the setup information in S200 broadcasts.\n\
-    Use --setup-test-cert to send the bundled test certificate over Bluetooth.\n\
+    Use --setup-test-cert to try Standard Auth setup with the bundled test certificate.\n\
     The discovery timeout defaults to 30 seconds.";
 const DEFAULT_SECONDS: u64 = 30;
 
@@ -181,6 +181,7 @@ fn run(_seconds: u64, _command: Command) -> ExitCode {
 
 #[cfg(windows)]
 fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result<()> {
+    use std::path::Path;
     use std::{io, ops::ControlFlow};
     use xiaomi_s200::SetupCertificateReply;
 
@@ -209,14 +210,18 @@ fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result
     if let Some(info) = scale.setup_info() {
         println!("{info}");
     }
-    println!(
-        "Sending the test certificate to {} over Bluetooth.",
-        scale.address()
-    );
-    let reply = xiaomi_s200::send_setup_test_certificate(&scale)?;
+    println!("Starting Standard Auth setup with {}.", scale.address());
+    let credentials_directory = Path::new("target/s200-setup-test");
+    let reply = xiaomi_s200::send_setup_test_certificate(&scale, credentials_directory)?;
     match reply {
-        SetupCertificateReply::RegistrationSucceeded
-        | SetupCertificateReply::ReceivedWithoutRegistrationResult => {
+        SetupCertificateReply::RegistrationSucceeded => {
+            println!(
+                "{reply}. Keys saved under {}.",
+                credentials_directory.display()
+            );
+            Ok(())
+        }
+        SetupCertificateReply::ReceivedWithoutRegistrationResult => {
             println!("{reply}.");
             Ok(())
         }

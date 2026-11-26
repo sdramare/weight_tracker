@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -10,15 +11,23 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::{
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter};
 
+use super::registration_crypto::RegistrationKeys;
 use super::{
     Apartment, Scale, check_service_status, open_scale_device, setup_characteristic, setup_service,
 };
 
 const CERTIFICATE: &[u8] = include_bytes!("s200-local-test.der");
 const CERTIFICATE_BLOCK: u8 = 0x07;
+const CERTIFICATE_MTU: u16 = 23;
+const DEVICE_INFO_OR_ID: u8 = 0x00;
+const PUBLIC_KEY_BLOCK: u8 = 0x03;
+const REQUEST_DEVICE_INFO: [u8; 4] = [0xa2, 0, 0, 0];
+const START_KEY_EXCHANGE: [u8; 4] = [0x15, 0, 0, 0];
+const CONFIRM_REGISTRATION: [u8; 4] = [0x13, 0, 0, 0];
 const READY: [u8; 4] = [0, 0, 1, 1];
 const FRAGMENTS_RECEIVED: [u8; 4] = [0, 0, 1, 0];
 const SINGLE_PACKET_RECEIVED: [u8; 4] = [0, 0, 3, 0];
+const TRANSFER_FAILED: [u8; 4] = [0, 0, 1, 5];
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A device response to transmitting the test certificate over Standard Auth.
@@ -43,10 +52,13 @@ impl fmt::Display for SetupCertificateReply {
     }
 }
 
-/// Sends the bundled certificate block to an unregistered ms113 requesting setup.
+/// Attempts Standard Auth registration of an unregistered ms113 using a local identity.
 ///
-/// The response belongs to the scale. This probes the certificate transfer alone.
-pub fn send_setup_test_certificate(scale: &Scale) -> io::Result<SetupCertificateReply> {
+/// Candidate keys are written to the supplied directory before requesting registration.
+pub fn send_setup_test_certificate(
+    scale: &Scale,
+    credentials_directory: &Path,
+) -> io::Result<SetupCertificateReply> {
     if !scale
         .setup_info()
         .is_some_and(|info| info.requests_certificate_test())
@@ -65,46 +77,62 @@ pub fn send_setup_test_certificate(scale: &Scale) -> io::Result<SetupCertificate
     let _control_subscription = Subscription::start(&control, Channel::Control, sender.clone())?;
     let _auth_subscription = Subscription::start(&auth, Channel::Auth, sender)?;
 
-    let packets = certificate_packets(service.Session()?.MaxPduSize()?)?;
-    let acknowledgment = match packets.as_slice() {
-        [packet] => {
-            write_packet(&auth, packet)?;
-            SINGLE_PACKET_RECEIVED
-        }
-        [announce, fragments @ ..] => {
-            write_packet(&auth, announce)?;
-            match await_reply(&replies, Some(READY)) {
-                Response::Control(reply) => {
-                    return Err(io::Error::other(format!(
-                        "before the certificate was sent, {reply}"
-                    )));
-                }
-                Response::Acknowledged => {}
-                Response::TimedOut => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "the scale did not acknowledge the certificate announcement",
-                    ));
-                }
-            }
-            for fragment in fragments {
-                write_packet(&auth, fragment)?;
-            }
-            FRAGMENTS_RECEIVED
-        }
-        [] => {
-            return Err(io::Error::other(
-                "the certificate produced no Bluetooth packets",
-            ));
-        }
-    };
+    let mtu = service.Session()?.MaxPduSize()?;
+    write_packet(&control, &REQUEST_DEVICE_INFO)?;
+    let info = receive_block(&auth, &replies, DEVICE_INFO_OR_ID, "device information")?;
+    // This is the unregistered, no-OOB capability reply observed on the ms113.
+    if info != [2, 0, 0, 0] {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the scale reported a different setup capability profile",
+        ));
+    }
 
-    match await_reply(&replies, Some(acknowledgment)) {
+    let exchange = RegistrationKeys::generate();
+    write_packet(&control, &START_KEY_EXCHANGE)?;
+    transmit_block(
+        &auth,
+        &replies,
+        mtu,
+        PUBLIC_KEY_BLOCK,
+        exchange.public_key(),
+        "app public key",
+    )?;
+    require_ack(&replies, FRAGMENTS_RECEIVED, "app public key")?;
+    let peer = receive_block(&auth, &replies, PUBLIC_KEY_BLOCK, "scale public key")?;
+    let registration = exchange.finish(&peer)?;
+    let encrypted_id = registration.encrypted_device_id()?;
+    registration.save_trial_credentials(credentials_directory)?;
+
+    write_packet(&control, &CONFIRM_REGISTRATION)?;
+    transmit_block(
+        &auth,
+        &replies,
+        mtu,
+        DEVICE_INFO_OR_ID,
+        &encrypted_id,
+        "encrypted device ID",
+    )?;
+    require_ack(&replies, FRAGMENTS_RECEIVED, "encrypted device ID")?;
+
+    transmit_block(
+        &auth,
+        &replies,
+        mtu,
+        CERTIFICATE_BLOCK,
+        CERTIFICATE,
+        "test certificate",
+    )?;
+    match await_reply(&replies, Some(FRAGMENTS_RECEIVED)) {
         Response::Control(reply) => Ok(reply),
         Response::Acknowledged => match await_reply(&replies, None) {
             Response::Control(reply) => Ok(reply),
-            _ => Ok(SetupCertificateReply::ReceivedWithoutRegistrationResult),
+            Response::TransferFailed => Err(transfer_error("test certificate")),
+            Response::TimedOut | Response::Acknowledged => {
+                Ok(SetupCertificateReply::ReceivedWithoutRegistrationResult)
+            }
         },
+        Response::TransferFailed => Err(transfer_error("test certificate")),
         Response::TimedOut => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "the test certificate was sent, but the scale gave no transfer acknowledgment or registration result",
@@ -112,7 +140,122 @@ pub fn send_setup_test_certificate(scale: &Scale) -> io::Result<SetupCertificate
     }
 }
 
-fn certificate_packets(mtu: u16) -> io::Result<Vec<Vec<u8>>> {
+fn transmit_block(
+    auth: &GattCharacteristic,
+    replies: &Receiver<(Channel, Vec<u8>)>,
+    mtu: u16,
+    kind: u8,
+    payload: &[u8],
+    description: &str,
+) -> io::Result<()> {
+    let (announcement, fragments) = block_packets(mtu, kind, payload)?;
+    write_packet(auth, &announcement)?;
+    require_ack(replies, READY, &format!("{description} announcement"))?;
+    for fragment in fragments {
+        write_packet(auth, &fragment)?;
+    }
+    Ok(())
+}
+
+fn require_ack(
+    replies: &Receiver<(Channel, Vec<u8>)>,
+    expected: [u8; 4],
+    stage: &str,
+) -> io::Result<()> {
+    match await_reply(replies, Some(expected)) {
+        Response::Acknowledged => Ok(()),
+        Response::TransferFailed => Err(transfer_error(stage)),
+        Response::Control(reply) => Err(io::Error::other(format!(
+            "while waiting for the {stage} acknowledgment, {reply}"
+        ))),
+        Response::TimedOut => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("the scale did not acknowledge the {stage}"),
+        )),
+    }
+}
+
+fn receive_block(
+    auth: &GattCharacteristic,
+    replies: &Receiver<(Channel, Vec<u8>)>,
+    kind: u8,
+    stage: &str,
+) -> io::Result<Vec<u8>> {
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    loop {
+        let packet = next_auth_packet(replies, deadline, stage)?;
+        match packet.as_slice() {
+            [0, 0, 2, block, data @ ..] if *block == kind => {
+                write_packet(auth, &SINGLE_PACKET_RECEIVED)?;
+                return Ok(data.to_vec());
+            }
+            [0, 0, 0, block, low, high] if *block == kind => {
+                let count = u16::from_le_bytes([*low, *high]);
+                if !(1..=32).contains(&count) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid fragment count for {stage}"),
+                    ));
+                }
+                write_packet(auth, &READY)?;
+                let mut data = Vec::new();
+                for index in 1..=count {
+                    let next = next_auth_packet(replies, deadline, stage)?;
+                    if !next.starts_with(&index.to_le_bytes()) || next.len() <= 2 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("out-of-order fragment for {stage}"),
+                        ));
+                    }
+                    data.extend_from_slice(&next[2..]);
+                }
+                write_packet(auth, &FRAGMENTS_RECEIVED)?;
+                return Ok(data);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn next_auth_packet(
+    replies: &Receiver<(Channel, Vec<u8>)>,
+    deadline: Instant,
+    stage: &str,
+) -> io::Result<Vec<u8>> {
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        match replies.recv_timeout(remaining) {
+            Ok((Channel::Auth, packet)) => {
+                if packet.starts_with(&TRANSFER_FAILED) {
+                    return Err(transfer_error(stage));
+                }
+                return Ok(packet);
+            }
+            Ok((Channel::Control, packet)) => {
+                if let Some(reply) = registration_reply(&packet) {
+                    return Err(io::Error::other(format!(
+                        "while waiting for {stage}, {reply}"
+                    )));
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("the scale did not send {stage}"),
+    ))
+}
+
+type BlockPackets = ([u8; 6], Vec<Vec<u8>>);
+
+fn block_packets(mtu: u16, kind: u8, payload: &[u8]) -> io::Result<BlockPackets> {
+    // The ms113 reported transfer error 0x05 for large certificate fragments at
+    // MTU 251. It acknowledged the same DER using at most 20 bytes per write.
+    let mtu = if kind == CERTIFICATE_BLOCK {
+        mtu.min(CERTIFICATE_MTU)
+    } else {
+        mtu
+    };
     // Bluetooth ATT writes use three bytes. Fragment indexes use two more bytes.
     let write_size = usize::from(mtu)
         .checked_sub(3)
@@ -123,23 +266,19 @@ fn certificate_packets(mtu: u16) -> io::Result<Vec<Vec<u8>>> {
                 "the scale reported an invalid Bluetooth MTU",
             )
         })?;
-    if CERTIFICATE.len() + 4 <= write_size {
-        let mut packet = vec![0, 0, 2, CERTIFICATE_BLOCK];
-        packet.extend_from_slice(CERTIFICATE);
-        return Ok(vec![packet]);
-    }
-    let fragments = CERTIFICATE.chunks(write_size - 2);
+    // The S200 capture uses an announced transfer for the app key and device ID
+    // even when the entire payload fits in one ATT write.
+    let fragments = payload.chunks(write_size - 2);
     let count = u16::try_from(fragments.len())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let [low, high] = count.to_le_bytes();
-    let mut packets = Vec::with_capacity(usize::from(count) + 1);
-    packets.push(vec![0, 0, 0, CERTIFICATE_BLOCK, low, high]);
+    let mut packets = Vec::with_capacity(usize::from(count));
     for (index, fragment) in (1..=count).zip(fragments) {
         let mut packet = index.to_le_bytes().to_vec();
         packet.extend_from_slice(fragment);
         packets.push(packet);
     }
-    Ok(packets)
+    Ok(([0, 0, 0, kind, low, high], packets))
 }
 
 fn write_packet(characteristic: &GattCharacteristic, packet: &[u8]) -> io::Result<()> {
@@ -163,6 +302,7 @@ enum Channel {
 enum Response {
     Control(SetupCertificateReply),
     Acknowledged,
+    TransferFailed,
     TimedOut,
 }
 
@@ -176,14 +316,13 @@ fn await_reply(
             break;
         };
         match (channel, packet.as_slice()) {
-            (Channel::Control, [0x11, 0, 0, 0]) => {
-                return Response::Control(SetupCertificateReply::RegistrationSucceeded);
+            (Channel::Control, packet) => {
+                if let Some(reply) = registration_reply(packet) {
+                    return Response::Control(reply);
+                }
             }
-            (Channel::Control, [0x12, 0, 0, 0]) => {
-                return Response::Control(SetupCertificateReply::RegistrationFailed);
-            }
-            (Channel::Control, [0xe1, 0, 0, 0]) => {
-                return Response::Control(SetupCertificateReply::AlreadyRegistered);
+            (Channel::Auth, data) if data.starts_with(&TRANSFER_FAILED) => {
+                return Response::TransferFailed;
             }
             (Channel::Auth, data)
                 if acknowledgment
@@ -196,6 +335,21 @@ fn await_reply(
         }
     }
     Response::TimedOut
+}
+
+fn transfer_error(stage: &str) -> io::Error {
+    io::Error::other(format!(
+        "the scale reported transfer error 0x05 for {stage}"
+    ))
+}
+
+fn registration_reply(packet: &[u8]) -> Option<SetupCertificateReply> {
+    match packet {
+        [0x11, 0, 0, 0] => Some(SetupCertificateReply::RegistrationSucceeded),
+        [0x12, 0, 0, 0] => Some(SetupCertificateReply::RegistrationFailed),
+        [0xe1, 0, 0, 0] => Some(SetupCertificateReply::AlreadyRegistered),
+        _ => None,
+    }
 }
 
 struct Subscription {
@@ -242,15 +396,15 @@ impl Drop for Subscription {
 
 #[cfg(test)]
 mod tests {
-    use super::{CERTIFICATE, certificate_packets};
+    use super::{CERTIFICATE, CERTIFICATE_BLOCK, PUBLIC_KEY_BLOCK, block_packets};
 
     #[test]
     fn frames_the_entire_certificate_at_small_mtu() {
-        let packets = certificate_packets(23).unwrap();
-        assert_eq!(packets[0], [0, 0, 0, 7, 19, 0]);
-        assert_eq!(packets.len(), 20);
+        let (header, packets) = block_packets(23, CERTIFICATE_BLOCK, CERTIFICATE).unwrap();
+        assert_eq!(header, [0, 0, 0, 7, 19, 0]);
+        assert_eq!(packets.len(), 19);
         assert!(packets.iter().all(|packet| packet.len() <= 20));
-        let data: Vec<_> = packets[1..]
+        let data: Vec<_> = packets
             .iter()
             .flat_map(|packet| &packet[2..])
             .copied()
@@ -259,10 +413,20 @@ mod tests {
     }
 
     #[test]
-    fn sends_one_packet_when_it_fits() {
-        let packets = certificate_packets(517).unwrap();
+    fn limits_certificate_packets_at_larger_mtu() {
+        let minimum_mtu = block_packets(23, CERTIFICATE_BLOCK, CERTIFICATE).unwrap();
+        assert_eq!(
+            block_packets(251, CERTIFICATE_BLOCK, CERTIFICATE).unwrap(),
+            minimum_mtu
+        );
+    }
+
+    #[test]
+    fn announces_one_key_fragment_when_the_key_fits() {
+        let (header, packets) = block_packets(247, PUBLIC_KEY_BLOCK, &[2; 64]).unwrap();
+        assert_eq!(header, [0, 0, 0, 3, 1, 0]);
         assert_eq!(packets.len(), 1);
-        assert_eq!(&packets[0][..4], &[0, 0, 2, 7]);
-        assert_eq!(&packets[0][4..], CERTIFICATE);
+        assert_eq!(&packets[0][..2], &[1, 0]);
+        assert_eq!(&packets[0][2..], &[2; 64]);
     }
 }

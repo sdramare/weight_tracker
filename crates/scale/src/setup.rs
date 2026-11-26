@@ -1,4 +1,5 @@
 mod certificate_transfer;
+mod registration_crypto;
 
 use std::{fmt, io};
 
