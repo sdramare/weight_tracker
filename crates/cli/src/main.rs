@@ -64,7 +64,7 @@ fn show_connection(duration: std::time::Duration) -> std::io::Result<()> {
     let scale = xiaomi_s200::find_connectable_scale(duration)?;
     println!(
         "Found a Xiaomi Smart Scale S200 at {}. Requesting its GATT services...",
-        scale.formatted_address(),
+        scale.address(),
     );
     let services = xiaomi_s200::read_services(&scale)?;
     println!(

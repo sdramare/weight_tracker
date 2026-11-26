@@ -3,6 +3,7 @@
 #![cfg(windows)]
 
 mod discovery;
+mod types;
 
 use std::io;
 use std::marker::PhantomData;
@@ -14,33 +15,30 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatu
 use windows::Devices::Bluetooth::{BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
-pub const MODEL_NAME: &str = "Xiaomi Smart Scale S200";
+pub use types::{BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength};
+
+pub const MODEL_NAME: ScaleName<'static> = ScaleName("Xiaomi Smart Scale S200");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scale {
-    address: u64,
+    address: BluetoothAddress,
     address_type: Option<BluetoothAddressType>,
     name: Option<String>,
-    signal_dbm: i16,
+    signal_strength: SignalStrength,
     connectable: bool,
 }
 
 impl Scale {
-    pub fn address(&self) -> u64 {
+    pub fn address(&self) -> BluetoothAddress {
         self.address
     }
 
-    pub fn formatted_address(&self) -> String {
-        let [_, _, a, b, c, d, e, f] = self.address.to_be_bytes();
-        format!("{a:02X}:{b:02X}:{c:02X}:{d:02X}:{e:02X}:{f:02X}")
+    pub fn name(&self) -> ScaleName<'_> {
+        self.name.as_deref().map(ScaleName).unwrap_or(MODEL_NAME)
     }
 
-    pub fn name(&self) -> &str {
-        self.name.as_deref().unwrap_or(MODEL_NAME)
-    }
-
-    pub fn signal_dbm(&self) -> i16 {
-        self.signal_dbm
+    pub fn signal_strength(&self) -> SignalStrength {
+        self.signal_strength
     }
 
     pub fn is_connectable(&self) -> bool {
@@ -82,14 +80,14 @@ pub fn find_connectable_scale(duration: Duration) -> io::Result<Scale> {
 }
 
 /// Connects to the scale and returns the UUIDs of its GATT services.
-pub fn read_services(scale: &Scale) -> io::Result<Vec<String>> {
+pub fn read_services(scale: &Scale) -> io::Result<Vec<GattServiceUuid>> {
     let _apartment = Apartment::initialize()?;
     let device = match scale.address_type {
         Some(kind) => BluetoothLEDevice::FromBluetoothAddressWithBluetoothAddressTypeAsync(
-            scale.address,
+            scale.address.0,
             kind,
         )?,
-        None => BluetoothLEDevice::FromBluetoothAddressAsync(scale.address)?,
+        None => BluetoothLEDevice::FromBluetoothAddressAsync(scale.address.0)?,
     }
     .join()
     .map_err(|error| io::Error::other(format!("Windows could not open the BLE device: {error}")))?;
@@ -120,7 +118,7 @@ pub fn read_services(scale: &Scale) -> io::Result<Vec<String>> {
 
     let services = result.Services()?;
     (0..services.Size()?)
-        .map(|index| Ok(format!("{:?}", services.GetAt(index)?.Uuid()?)))
+        .map(|index| Ok(GattServiceUuid(services.GetAt(index)?.Uuid()?)))
         .collect()
 }
 

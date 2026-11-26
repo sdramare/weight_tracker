@@ -13,13 +13,13 @@ use windows::Devices::Bluetooth::BluetoothAddressType;
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::DataReader;
 
-use super::Scale;
+use super::{BluetoothAddress, Scale, SignalStrength};
 
 struct Advertisement {
-    address: u64,
+    address: BluetoothAddress,
     is_s200: bool,
     name: Option<String>,
-    signal_dbm: i16,
+    signal_strength: SignalStrength,
     connectable: bool,
     address_type: Option<BluetoothAddressType>,
 }
@@ -113,7 +113,7 @@ fn wait_for_scales(
     mut on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let deadline = Instant::now() + duration;
-    let mut candidates = HashMap::<u64, Candidate>::new();
+    let mut candidates = HashMap::<BluetoothAddress, Candidate>::new();
 
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         match receiver.recv_timeout(remaining) {
@@ -128,7 +128,7 @@ fn wait_for_scales(
                                 address: advertisement.address,
                                 address_type: None,
                                 name: None,
-                                signal_dbm: advertisement.signal_dbm,
+                                signal_strength: advertisement.signal_strength,
                                 connectable: false,
                             },
                         });
@@ -158,13 +158,13 @@ impl Candidate {
             .is_some_and(|name| scale.name.as_ref() != Some(name));
         let changed = !self.is_s200
             || scale.address_type != address_type
-            || scale.signal_dbm != advertisement.signal_dbm
+            || scale.signal_strength != advertisement.signal_strength
             || scale.connectable != connectable
             || name_changed;
 
         self.is_s200 |= advertisement.is_s200;
         scale.address_type = address_type;
-        scale.signal_dbm = advertisement.signal_dbm;
+        scale.signal_strength = advertisement.signal_strength;
         scale.connectable = connectable;
         if name_changed {
             scale.name = advertisement.name;
@@ -224,10 +224,10 @@ fn read_advertisement(
     });
 
     Ok(Some(Advertisement {
-        address,
+        address: BluetoothAddress(address),
         is_s200,
         name,
-        signal_dbm,
+        signal_strength: SignalStrength(signal_dbm),
         connectable,
         address_type,
     }))
@@ -260,8 +260,8 @@ fn is_s200_service_data(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Advertisement, BluetoothAddressType, ControlFlow, Duration, Event, is_s200_service_data,
-        mpsc, wait_for_scales,
+        Advertisement, BluetoothAddress, BluetoothAddressType, ControlFlow, Duration, Event,
+        SignalStrength, is_s200_service_data, mpsc, wait_for_scales,
     };
 
     #[test]
@@ -287,10 +287,10 @@ mod tests {
         ] {
             sender
                 .send(Event::Advertisement(Advertisement {
-                    address,
+                    address: BluetoothAddress(address),
                     is_s200,
                     name: is_s200.then(|| format!("Xiaomi Scale S200 {address}")),
-                    signal_dbm: -60,
+                    signal_strength: SignalStrength(-60),
                     connectable,
                     address_type,
                 }))
@@ -302,9 +302,9 @@ mod tests {
             updates.push((
                 scale.address(),
                 scale.is_connectable(),
-                scale.name().to_owned(),
+                scale.name().to_string(),
             ));
-            if scale.address() == 56 {
+            if scale.address() == BluetoothAddress(56) {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
@@ -314,9 +314,21 @@ mod tests {
         assert_eq!(
             updates,
             [
-                (12, false, "Xiaomi Scale S200 12".to_owned()),
-                (12, true, "Xiaomi Scale S200 12".to_owned()),
-                (56, false, "Xiaomi Scale S200 56".to_owned()),
+                (
+                    BluetoothAddress(12),
+                    false,
+                    "Xiaomi Scale S200 12".to_owned()
+                ),
+                (
+                    BluetoothAddress(12),
+                    true,
+                    "Xiaomi Scale S200 12".to_owned()
+                ),
+                (
+                    BluetoothAddress(56),
+                    false,
+                    "Xiaomi Scale S200 56".to_owned()
+                ),
             ]
         );
     }

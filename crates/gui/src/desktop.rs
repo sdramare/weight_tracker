@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
-use xiaomi_s200::{MODEL_NAME, Scale, discover_scales};
+use xiaomi_s200::{BluetoothAddress, MODEL_NAME, Scale, discover_scales};
 
 const SCAN_DURATION: Duration = Duration::from_secs(30);
 const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 243);
@@ -41,7 +41,7 @@ enum ScanEvent {
 }
 
 struct ScaleApp {
-    scales: BTreeMap<u64, Scale>,
+    scales: BTreeMap<BluetoothAddress, Scale>,
     status: ScanStatus,
 }
 
@@ -145,7 +145,7 @@ impl eframe::App for ScaleApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.heading(RichText::new("Nearby scales").size(28.0));
-                        ui.label(RichText::new(MODEL_NAME).color(MUTED));
+                        ui.label(RichText::new(MODEL_NAME.to_string()).color(MUTED));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let scanning = matches!(self.status, ScanStatus::Scanning(_));
@@ -180,16 +180,16 @@ fn scale_row(ui: &mut egui::Ui, scale: &Scale) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(scale.name()).strong());
+                    ui.label(RichText::new(scale.name().to_string()).strong());
                     ui.label(
-                        RichText::new(scale.formatted_address())
+                        RichText::new(scale.address().to_string())
                             .monospace()
                             .color(MUTED),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(format!("{} dBm", scale.signal_dbm())).strong());
+                        ui.label(RichText::new(scale.signal_strength().to_string()).strong());
                         let state = if scale.is_connectable() {
                             "Connectable"
                         } else {
