@@ -12,6 +12,9 @@ use xiaomi_s200::{
     Weight, WeightReading, watch_connected_weights, watch_scales,
 };
 
+use super::history::{History, WeightEntry};
+use super::{tray, weight_plot};
+
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 243);
 const INK: Color32 = Color32::from_rgb(19, 43, 38);
@@ -20,16 +23,21 @@ const ACCENT: Color32 = Color32::from_rgb(17, 102, 80);
 const BORDER: Color32 = Color32::from_rgb(214, 224, 217);
 
 pub fn run() -> eframe::Result {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/scale-icon.png")).ok();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([780.0, 640.0])
+        .with_min_inner_size([540.0, 520.0]);
+    if let Some(icon) = &icon {
+        viewport = viewport.with_icon(icon.clone());
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([620.0, 430.0])
-            .with_min_inner_size([430.0, 300.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
         "Xiaomi Smart Scale S200",
         options,
-        Box::new(|creation| Ok(Box::new(ScaleApp::new(&creation.egui_ctx)))),
+        Box::new(move |creation| Ok(Box::new(ScaleApp::new(creation, icon.as_ref())))),
     )
 }
 
@@ -45,6 +53,9 @@ enum MonitorEvent {
     Scale(Scale),
     Status(MonitorStatus),
     Weight(BluetoothAddress, WeightReading),
+    HistoryLoaded(Vec<WeightEntry>),
+    WeightRecorded(WeightEntry),
+    HistoryError(String),
 }
 
 struct ScaleRow {
@@ -59,13 +70,24 @@ struct ScaleApp {
     listening: Arc<AtomicBool>,
     status: MonitorStatus,
     weight_hint: Option<String>,
+    history: Vec<WeightEntry>,
+    history_error: Option<String>,
+    group_by: weight_plot::GroupBy,
+    tray: Option<tray_icon::TrayIcon>,
+    tray_error: Option<String>,
 }
 
 impl ScaleApp {
-    fn new(context: &egui::Context) -> Self {
+    fn new(creation: &eframe::CreationContext<'_>, icon: Option<&egui::IconData>) -> Self {
+        let context = &creation.egui_ctx;
         let mut visuals = egui::Visuals::light();
         visuals.override_text_color = Some(INK);
         context.set_visuals(visuals);
+        let (tray, tray_error) = match icon.map(|icon| tray::create(creation, icon)) {
+            Some(Ok(tray)) => (Some(tray), None),
+            Some(Err(error)) => (None, Some(error.to_string())),
+            None => (None, Some("The scale icon could not be loaded.".into())),
+        };
 
         let (sender, receiver) = mpsc::channel();
         let listening = Arc::new(AtomicBool::new(true));
@@ -102,6 +124,11 @@ impl ScaleApp {
             listening,
             status,
             weight_hint,
+            history: Vec::new(),
+            history_error: None,
+            group_by: weight_plot::GroupBy::Day,
+            tray,
+            tray_error,
         }
     }
 
@@ -149,6 +176,12 @@ impl ScaleApp {
                         }
                     }
                 }
+                Ok(MonitorEvent::HistoryLoaded(entries)) => self.history = entries,
+                Ok(MonitorEvent::WeightRecorded(entry)) => {
+                    self.history.push(entry);
+                    self.history_error = None;
+                }
+                Ok(MonitorEvent::HistoryError(error)) => self.history_error = Some(error),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.events = None;
@@ -205,35 +238,69 @@ fn monitor_scales(
         context.request_repaint();
         ControlFlow::Continue(())
     };
+    let history = match History::open().and_then(|history| {
+        let entries = history.entries().map_err(std::io::Error::other)?;
+        Ok((history, entries))
+    }) {
+        Ok((history, entries)) => {
+            if post(MonitorEvent::HistoryLoaded(entries)).is_break() {
+                return;
+            }
+            Some(history)
+        }
+        Err(error) => {
+            if post(MonitorEvent::HistoryError(error.to_string())).is_break() {
+                return;
+            }
+            None
+        }
+    };
+    let record_weight = |weight| {
+        if let Some(history) = &history {
+            match history.record(weight) {
+                Ok(Some(entry)) => return post(MonitorEvent::WeightRecorded(entry)),
+                Err(error) => return post(MonitorEvent::HistoryError(error.to_string())),
+                Ok(None) => {}
+            }
+        }
+        ControlFlow::Continue(())
+    };
     while keep_listening() && post(MonitorEvent::Status(MonitorStatus::Listening)).is_continue() {
         let mut target = None;
-        let result = watch_scales(bind_key, keep_listening, |scale| {
-            post(MonitorEvent::Scale(scale.clone()))?;
-            if scale.is_connectable() && logins.token_for(scale).is_some() {
-                target = Some(scale.clone());
-                return ControlFlow::Break(());
-            }
-            ControlFlow::Continue(())
-        })
-        .and_then(|()| {
-            if let Some(scale) = target
-                && let Some(token) = logins.token_for(&scale)
-                && post(MonitorEvent::Status(MonitorStatus::Connecting)).is_continue()
-            {
-                return watch_connected_weights(&scale, token, keep_listening, |event| {
-                    let update = match event {
-                        ConnectedWeightEvent::Ready => {
-                            MonitorEvent::Status(MonitorStatus::Connected)
+        let result =
+            watch_scales(bind_key, keep_listening, |scale, broadcast_weight| {
+                post(MonitorEvent::Scale(scale.clone()))?;
+                if let Some(weight) = broadcast_weight {
+                    record_weight(weight)?;
+                }
+                if scale.is_connectable() && logins.token_for(scale).is_some() {
+                    target = Some(scale.clone());
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(())
+            })
+            .and_then(|()| {
+                if let Some(scale) = target
+                    && let Some(token) = logins.token_for(&scale)
+                    && post(MonitorEvent::Status(MonitorStatus::Connecting)).is_continue()
+                {
+                    return watch_connected_weights(&scale, token, keep_listening, |event| {
+                        match event {
+                            ConnectedWeightEvent::Ready => {
+                                post(MonitorEvent::Status(MonitorStatus::Connected))
+                            }
+                            ConnectedWeightEvent::Reading(reading) => {
+                                post(MonitorEvent::Weight(scale.address(), reading))?;
+                                if let WeightReading::Settled(weight) = reading {
+                                    record_weight(weight)?;
+                                }
+                                ControlFlow::Continue(())
+                            }
                         }
-                        ConnectedWeightEvent::Reading(reading) => {
-                            MonitorEvent::Weight(scale.address(), reading)
-                        }
-                    };
-                    post(update)
-                });
-            }
-            Ok(())
-        });
+                    });
+                }
+                Ok(())
+            });
         if let Err(error) = result {
             if !keep_listening()
                 || post(MonitorEvent::Status(MonitorStatus::Retrying(
@@ -254,20 +321,51 @@ impl eframe::App for ScaleApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(24))
             .show(context, |ui| {
-                ui.heading(RichText::new("Nearby scales").size(28.0));
-                ui.label(RichText::new(MODEL_NAME.to_string()).color(MUTED));
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.heading(RichText::new("Weight monitor").size(28.0));
+                        ui.label(RichText::new(MODEL_NAME.to_string()).color(MUTED));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.tray.is_some() && ui.button("Hide to tray").clicked() {
+                            context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        }
+                    });
+                });
                 ui.add_space(15.0);
                 self.status_line(ui);
                 if let Some(hint) = &self.weight_hint {
                     ui.label(RichText::new(hint).color(MUTED));
                 }
+                if let Some(error) = &self.tray_error {
+                    ui.label(
+                        RichText::new(format!("System tray unavailable. {error}")).color(MUTED),
+                    );
+                }
                 ui.add_space(12.0);
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for row in self.scales.values() {
-                        scale_row(ui, row);
-                        ui.add_space(6.0);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(142.0)
+                    .show(ui, |ui| {
+                        for row in self.scales.values() {
+                            scale_row(ui, row);
+                            ui.add_space(6.0);
+                        }
+                    });
+                ui.add_space(12.0);
+                egui::Frame::new()
+                    .fill(Color32::WHITE)
+                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .corner_radius(10)
+                    .inner_margin(14)
+                    .show(ui, |ui| {
+                        if let Some(error) = &self.history_error {
+                            ui.label(
+                                RichText::new(format!("Weight history: {error}"))
+                                    .color(Color32::DARK_RED),
+                            );
+                        }
+                        weight_plot::show(ui, &self.history, &mut self.group_by);
+                    });
             });
     }
 }

@@ -123,18 +123,20 @@ impl Drop for Watcher {
 pub(super) fn discover(
     duration: Duration,
     decoder: Option<WeightDecoder>,
-    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+    mut on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let deadline = Instant::now()
         .checked_add(duration)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid scan duration"))?;
-    run_scan(ScanWindow::Timed(deadline), decoder, on_scale)
+    run_scan(ScanWindow::Timed(deadline), decoder, |scale, _| {
+        on_scale(scale)
+    })
 }
 
 pub(super) fn watch(
     decoder: Option<WeightDecoder>,
     keep_listening: impl Fn() -> bool,
-    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+    on_scale: impl FnMut(&Scale, Option<Weight>) -> ControlFlow<()>,
 ) -> io::Result<()> {
     run_scan(ScanWindow::Continuous(&keep_listening), decoder, on_scale)
 }
@@ -142,7 +144,7 @@ pub(super) fn watch(
 fn run_scan(
     window: ScanWindow<'_>,
     decoder: Option<WeightDecoder>,
-    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+    on_scale: impl FnMut(&Scale, Option<Weight>) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let (sender, receiver) = mpsc::channel();
     let watcher = Watcher::start(sender, decoder)?;
@@ -153,7 +155,7 @@ fn run_scan(
 fn wait_for_scales(
     window: ScanWindow<'_>,
     receiver: Receiver<Event>,
-    mut on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+    mut on_scale: impl FnMut(&Scale, Option<Weight>) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let mut candidates = HashMap::<BluetoothAddress, Candidate>::new();
     let mut next_prune = Instant::now() + CANDIDATE_LIFETIME;
@@ -168,6 +170,7 @@ fn wait_for_scales(
         }
         match receiver.recv_timeout(remaining) {
             Ok(Event::Advertisement(advertisement)) => {
+                let received_weight = advertisement.weight;
                 // Identification and connectability can be reported in separate packets.
                 let candidate =
                     candidates
@@ -186,7 +189,13 @@ fn wait_for_scales(
                             },
                         });
                 candidate.last_seen = Instant::now();
-                if candidate.update(advertisement) && on_scale(&candidate.scale).is_break() {
+                let changed = candidate.update(advertisement);
+                let fresh_weight = matches!(&window, ScanWindow::Continuous(_))
+                    && candidate.is_s200
+                    && received_weight.is_some();
+                if (changed || fresh_weight)
+                    && on_scale(&candidate.scale, received_weight).is_break()
+                {
                     break;
                 }
             }
@@ -358,7 +367,7 @@ mod tests {
             waits.set(waits.get() + 1);
             waits.get() <= 2
         };
-        wait_for_scales(ScanWindow::Continuous(&keep_listening), receiver, |_| {
+        wait_for_scales(ScanWindow::Continuous(&keep_listening), receiver, |_, _| {
             ControlFlow::Continue(())
         })
         .unwrap();
@@ -395,7 +404,7 @@ mod tests {
         wait_for_scales(
             ScanWindow::Timed(Instant::now() + Duration::from_secs(1)),
             receiver,
-            |scale| {
+            |scale, _| {
                 updates.push((
                     scale.address(),
                     scale.is_connectable(),

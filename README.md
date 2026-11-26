@@ -16,7 +16,7 @@ From the repository root, run this in PowerShell to open the desktop app.
 cargo run -p blt_unlock_gui
 ```
 
-The desktop app keeps listening while it is open and lists the scales it discovers. Step on the S200 to start a reading. The app connects as soon as the registered scale advertises and resumes listening automatically when it sleeps.
+The desktop app keeps listening while it is running and lists the scales it discovers. Step on the S200 to start a reading. The app connects as soon as the registered scale advertises and resumes listening automatically when it sleeps. Select **Hide to tray** to keep monitoring in the background. Use the tray menu to show the window or quit.
 
 Run the CLI with the default discovery timeout or set a longer one.
 
@@ -45,6 +45,12 @@ $key = Read-Host 'S200 bind key' -AsSecureString
 $env:S200_BINDKEY = [System.Net.NetworkCredential]::new('', $key).Password
 cargo run -p blt_unlock_gui
 ```
+
+## Weight history
+
+The desktop app stores the first settled weight and saves another only when more than 24 hours have elapsed since the last saved record. The live display updates on every weigh-in. Weight history stays in `data/weights.sqlite3` in the project folder.
+
+Select **By day**, **By week**, or **By month** to group readings by your local calendar. Weekly and monthly points show average weight for that period. After three saved readings, the chart adds a dashed 30-day forecast based on the trend in up to the last 30 readings.
 
 
 ## Register an S200 ms113

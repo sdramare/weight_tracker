@@ -174,7 +174,7 @@
             <text class="node-detail" x="589" y="208">Name, Bluetooth address, signal strength, and connectability</text>
           </svg>
         </div>
-        <figcaption>The desktop app listens while its window is open. The terminal scan defaults to 30 seconds, which you can change with <code>cargo run -- --seconds 45</code>.</figcaption>
+        <figcaption>The desktop app listens while it is running. Select <strong>Hide to tray</strong> to keep monitoring in the background. Open the tray menu to restore the window or quit. The terminal scan defaults to 30 seconds.</figcaption>
       </figure>
     </section>
 
@@ -204,6 +204,35 @@
           </svg>
         </div>
         <figcaption>The desktop app keeps the last settled reading visible and resumes listening when the scale sleeps. Use <code>cargo run -- --weight</code> for one reading in the terminal. See the <a href="../README.md#read-a-weight">README</a> for MiBeacon weight.</figcaption>
+      </figure>
+    </section>
+
+    <section class="panel" aria-labelledby="history-heading">
+      <h2 id="history-heading">How weight history is saved</h2>
+      <figure>
+        <div class="diagram" role="region" aria-label="Scrollable weight history diagram" tabindex="0">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="history-title history-description">
+            <title id="history-title">From a settled weight to the history chart</title>
+            <desc id="history-description">A settled reading is saved locally in SQLite when it is the first or more than 24 hours have elapsed since the last record. The chart groups those records by day, week, or month and forecasts their trend.</desc>
+            <defs>
+              <marker id="history-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+                <path d="M0 0L9 4L0 8Z" fill="#116650"/>
+              </marker>
+            </defs>
+            <rect class="node" x="14" y="22" width="220" height="64" rx="10"/>
+            <text class="node-title" x="124" y="49">Settled weight</text>
+            <text class="node-detail" x="124" y="69">Every weigh-in updates the app</text>
+            <path class="arrow" d="M234 54H287" marker-end="url(#history-arrow)"/>
+            <rect class="node" x="292" y="22" width="256" height="64" rx="10"/>
+            <text class="node-title" x="420" y="49">Save to SQLite</text>
+            <text class="node-detail" x="420" y="69">First reading or more than 24 h later</text>
+            <path class="arrow" d="M548 54H600" marker-end="url(#history-arrow)"/>
+            <rect class="node-accent" x="605" y="22" width="221" height="64" rx="10"/>
+            <text class="node-title node-inverse" x="715" y="49">Chart the trend</text>
+            <text class="node-detail node-inverse" x="715" y="69">Day, week, or month</text>
+          </svg>
+        </div>
+        <figcaption>History stays in <code>data/weights.sqlite3</code>. The dashed 30-day forecast appears after three saved readings.</figcaption>
       </figure>
     </section>
 

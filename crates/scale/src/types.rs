@@ -37,6 +37,16 @@ impl fmt::Display for SignalStrength {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Weight(pub(super) u32);
 
+impl Weight {
+    pub const fn from_hundredths_of_kg(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn hundredths_of_kg(self) -> u32 {
+        self.0
+    }
+}
+
 impl fmt::Display for Weight {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}.{:02} kg", self.0 / 100, self.0 % 100)

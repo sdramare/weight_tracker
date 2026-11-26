@@ -97,11 +97,12 @@ pub fn discover_scales_with_weight(
 }
 
 /// Watches for scales until stopped by the caller. An optional bind key enables
-/// authenticated MiBeacon weight readings.
+/// authenticated MiBeacon weight readings. The second callback argument contains
+/// the weight carried by the current advertisement, when present.
 pub fn watch_scales(
     key: Option<&ScaleBindKey>,
     keep_listening: impl Fn() -> bool,
-    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+    on_scale: impl FnMut(&Scale, Option<Weight>) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
     discovery::watch(key.map(WeightDecoder::new), keep_listening, on_scale)

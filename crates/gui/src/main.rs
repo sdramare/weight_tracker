@@ -1,5 +1,13 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(windows)]
 mod desktop;
+#[cfg(windows)]
+mod history;
+#[cfg(windows)]
+mod tray;
+#[cfg(windows)]
+mod weight_plot;
 
 #[cfg(windows)]
 fn main() -> eframe::Result {
