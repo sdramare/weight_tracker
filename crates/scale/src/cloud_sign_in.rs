@@ -4,13 +4,16 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use url::Url;
-use windows::Data::Json::JsonObject;
+use windows::Data::Json::{JsonObject, JsonValue};
 use windows::core::HSTRING;
 
 use super::Apartment;
 
 mod cloud_api;
 mod https;
+mod registration_api;
+
+pub(crate) use registration_api::{CloudAuthorization, CloudDeviceId};
 
 const ACCOUNT_BOOTSTRAP: &str = "https://account.xiaomi.com/longPolling/loginUrl";
 const SESSION_CALLBACK: &str = "https://sts.api.io.mi.com/sts";
@@ -32,9 +35,7 @@ impl fmt::Display for XiaomiSignInLink {
 /// The caller presents the login link. The function waits for Xiaomi to finish
 /// authorization, then verifies that its callback issued a service session.
 pub fn verify_xiaomi_sign_in(present: impl FnOnce(&XiaomiSignInLink)) -> io::Result<()> {
-    let _apartment = Apartment::initialize()?;
-    let client = https::Session::new()?;
-    sign_in(&client, present).map(|_| ())
+    EuropeSession::sign_in(present).map(|_| ())
 }
 
 /// Uses browser sign-in to check the account's access to Xiaomi's Europe API.
@@ -47,11 +48,36 @@ pub(super) fn check_xiaomi_cloud_europe(
     present: impl FnOnce(&XiaomiSignInLink),
     on_signed_in: impl FnOnce(),
 ) -> io::Result<()> {
-    let _apartment = Apartment::initialize()?;
-    let client = https::Session::new()?;
-    let account = sign_in(&client, present)?;
+    let session = EuropeSession::sign_in(present)?;
     on_signed_in();
-    cloud_api::verify_device_count(&client, &account)
+    session.verify_device_count()
+}
+
+pub(crate) struct EuropeSession {
+    client: https::Session,
+    account: CloudAccount,
+    _apartment: Apartment,
+}
+
+impl EuropeSession {
+    pub(crate) fn sign_in(present: impl FnOnce(&XiaomiSignInLink)) -> io::Result<Self> {
+        let apartment = Apartment::initialize()?;
+        let client = https::Session::new()?;
+        let account = sign_in(&client, present)?;
+        Ok(Self {
+            client,
+            account,
+            _apartment: apartment,
+        })
+    }
+
+    pub(crate) fn verify_device_count(&self) -> io::Result<()> {
+        cloud_api::verify_device_count(&self.client, &self.account)
+    }
+
+    fn request(&self, path: &str, data: &str) -> io::Result<JsonValue> {
+        cloud_api::signed_request(&self.client, &self.account, path, data)
+    }
 }
 
 struct CloudAccount {

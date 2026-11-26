@@ -5,13 +5,14 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
-    GattCharacteristic, GattClientCharacteristicConfigurationDescriptorValue,
-    GattValueChangedEventArgs, GattWriteOption,
+    GattCharacteristic, GattCharacteristicProperties,
+    GattClientCharacteristicConfigurationDescriptorValue, GattValueChangedEventArgs,
+    GattWriteOption,
 };
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter};
 
-use super::registration_crypto::RegistrationKeys;
+use super::registration_crypto::{Registration, RegistrationKeys};
 use super::{
     Apartment, Scale, check_service_status, open_scale_device, setup_characteristic, setup_service,
 };
@@ -24,10 +25,10 @@ const PUBLIC_KEY_BLOCK: u8 = 0x03;
 const REQUEST_DEVICE_INFO: [u8; 4] = [0xa2, 0, 0, 0];
 const START_KEY_EXCHANGE: [u8; 4] = [0x15, 0, 0, 0];
 const CONFIRM_REGISTRATION: [u8; 4] = [0x13, 0, 0, 0];
-const READY: [u8; 4] = [0, 0, 1, 1];
-const FRAGMENTS_RECEIVED: [u8; 4] = [0, 0, 1, 0];
+pub(super) const READY: [u8; 4] = [0, 0, 1, 1];
+pub(super) const FRAGMENTS_RECEIVED: [u8; 4] = [0, 0, 1, 0];
 const SINGLE_PACKET_RECEIVED: [u8; 4] = [0, 0, 3, 0];
-const TRANSFER_FAILED: [u8; 4] = [0, 0, 1, 5];
+pub(super) const TRANSFER_FAILED: [u8; 4] = [0, 0, 1, 5];
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A device response to transmitting the test certificate over Standard Auth.
@@ -59,6 +60,29 @@ pub fn send_setup_test_certificate(
     scale: &Scale,
     credentials_directory: &Path,
 ) -> io::Result<SetupCertificateReply> {
+    register_with(scale, |registration| {
+        let encrypted_id = registration.encrypted_device_id()?;
+        registration.save_trial_credentials(credentials_directory)?;
+        Ok((
+            RegistrationProof {
+                encrypted_id,
+                certificate: CERTIFICATE.to_vec(),
+            },
+            (),
+        ))
+    })
+    .map(|(reply, ())| reply)
+}
+
+pub(super) struct RegistrationProof {
+    pub(super) encrypted_id: Vec<u8>,
+    pub(super) certificate: Vec<u8>,
+}
+
+pub(super) fn register_with<T>(
+    scale: &Scale,
+    authorize: impl FnOnce(&Registration) -> io::Result<(RegistrationProof, T)>,
+) -> io::Result<(SetupCertificateReply, T)> {
     if !scale
         .setup_info()
         .is_some_and(|info| info.requests_certificate_test())
@@ -101,8 +125,7 @@ pub fn send_setup_test_certificate(
     require_ack(&replies, FRAGMENTS_RECEIVED, "app public key")?;
     let peer = receive_block(&auth, &replies, PUBLIC_KEY_BLOCK, "scale public key")?;
     let registration = exchange.finish(&peer)?;
-    let encrypted_id = registration.encrypted_device_id()?;
-    registration.save_trial_credentials(credentials_directory)?;
+    let (proof, state) = authorize(&registration)?;
 
     write_packet(&control, &CONFIRM_REGISTRATION)?;
     transmit_block(
@@ -110,7 +133,7 @@ pub fn send_setup_test_certificate(
         &replies,
         mtu,
         DEVICE_INFO_OR_ID,
-        &encrypted_id,
+        &proof.encrypted_id,
         "encrypted device ID",
     )?;
     require_ack(&replies, FRAGMENTS_RECEIVED, "encrypted device ID")?;
@@ -120,24 +143,25 @@ pub fn send_setup_test_certificate(
         &replies,
         mtu,
         CERTIFICATE_BLOCK,
-        CERTIFICATE,
-        "test certificate",
+        &proof.certificate,
+        "registration certificate",
     )?;
-    match await_reply(&replies, Some(FRAGMENTS_RECEIVED)) {
+    let reply = match await_reply(&replies, Some(FRAGMENTS_RECEIVED)) {
         Response::Control(reply) => Ok(reply),
         Response::Acknowledged => match await_reply(&replies, None) {
             Response::Control(reply) => Ok(reply),
-            Response::TransferFailed => Err(transfer_error("test certificate")),
+            Response::TransferFailed => Err(transfer_error("registration certificate")),
             Response::TimedOut | Response::Acknowledged => {
                 Ok(SetupCertificateReply::ReceivedWithoutRegistrationResult)
             }
         },
-        Response::TransferFailed => Err(transfer_error("test certificate")),
+        Response::TransferFailed => Err(transfer_error("registration certificate")),
         Response::TimedOut => Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "the test certificate was sent, but the scale gave no transfer acknowledgment or registration result",
+            "the certificate was sent, but the scale gave no transfer acknowledgment or registration result",
         )),
-    }
+    }?;
+    Ok((reply, state))
 }
 
 fn transmit_block(
@@ -182,14 +206,25 @@ fn receive_block(
     stage: &str,
 ) -> io::Result<Vec<u8>> {
     let deadline = Instant::now() + REPLY_TIMEOUT;
+    receive_framed_block(auth, Some(kind), stage, || {
+        next_auth_packet(replies, deadline, stage)
+    })
+}
+
+pub(super) fn receive_framed_block(
+    characteristic: &GattCharacteristic,
+    expected: Option<u8>,
+    stage: &str,
+    mut next: impl FnMut() -> io::Result<Vec<u8>>,
+) -> io::Result<Vec<u8>> {
     loop {
-        let packet = next_auth_packet(replies, deadline, stage)?;
+        let packet = next()?;
         match packet.as_slice() {
-            [0, 0, 2, block, data @ ..] if *block == kind => {
-                write_packet(auth, &SINGLE_PACKET_RECEIVED)?;
+            [0, 0, 2, block, data @ ..] if expected.is_none_or(|kind| *block == kind) => {
+                write_packet(characteristic, &SINGLE_PACKET_RECEIVED)?;
                 return Ok(data.to_vec());
             }
-            [0, 0, 0, block, low, high] if *block == kind => {
+            [0, 0, 0, block, low, high] if expected.is_none_or(|kind| *block == kind) => {
                 let count = u16::from_le_bytes([*low, *high]);
                 if !(1..=32).contains(&count) {
                     return Err(io::Error::new(
@@ -197,19 +232,19 @@ fn receive_block(
                         format!("invalid fragment count for {stage}"),
                     ));
                 }
-                write_packet(auth, &READY)?;
+                write_packet(characteristic, &READY)?;
                 let mut data = Vec::new();
                 for index in 1..=count {
-                    let next = next_auth_packet(replies, deadline, stage)?;
-                    if !next.starts_with(&index.to_le_bytes()) || next.len() <= 2 {
+                    let fragment = next()?;
+                    if !fragment.starts_with(&index.to_le_bytes()) || fragment.len() <= 2 {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("out-of-order fragment for {stage}"),
                         ));
                     }
-                    data.extend_from_slice(&next[2..]);
+                    data.extend_from_slice(&fragment[2..]);
                 }
-                write_packet(auth, &FRAGMENTS_RECEIVED)?;
+                write_packet(characteristic, &FRAGMENTS_RECEIVED)?;
                 return Ok(data);
             }
             _ => {}
@@ -237,6 +272,7 @@ fn next_auth_packet(
                     )));
                 }
             }
+            Ok((Channel::Data, _)) => {}
             Err(_) => break,
         }
     }
@@ -248,7 +284,7 @@ fn next_auth_packet(
 
 type BlockPackets = ([u8; 6], Vec<Vec<u8>>);
 
-fn block_packets(mtu: u16, kind: u8, payload: &[u8]) -> io::Result<BlockPackets> {
+pub(super) fn block_packets(mtu: u16, kind: u8, payload: &[u8]) -> io::Result<BlockPackets> {
     // The ms113 reported transfer error 0x05 for large certificate fragments at
     // MTU 251. It acknowledged the same DER using at most 20 bytes per write.
     let mtu = if kind == CERTIFICATE_BLOCK {
@@ -281,7 +317,7 @@ fn block_packets(mtu: u16, kind: u8, payload: &[u8]) -> io::Result<BlockPackets>
     Ok(([0, 0, 0, kind, low, high], packets))
 }
 
-fn write_packet(characteristic: &GattCharacteristic, packet: &[u8]) -> io::Result<()> {
+pub(super) fn write_packet(characteristic: &GattCharacteristic, packet: &[u8]) -> io::Result<()> {
     let writer = DataWriter::new()?;
     writer.WriteBytes(packet)?;
     let result = characteristic
@@ -294,9 +330,10 @@ fn write_packet(characteristic: &GattCharacteristic, packet: &[u8]) -> io::Resul
 }
 
 #[derive(Clone, Copy)]
-enum Channel {
+pub(super) enum Channel {
     Control,
     Auth,
+    Data,
 }
 
 enum Response {
@@ -352,17 +389,28 @@ fn registration_reply(packet: &[u8]) -> Option<SetupCertificateReply> {
     }
 }
 
-struct Subscription {
+pub(super) struct Subscription {
     characteristic: GattCharacteristic,
     token: i64,
 }
 
 impl Subscription {
-    fn start(
+    pub(super) fn start(
         characteristic: &GattCharacteristic,
         channel: Channel,
         sender: Sender<(Channel, Vec<u8>)>,
     ) -> io::Result<Self> {
+        let properties = characteristic.CharacteristicProperties()?;
+        let delivery = if properties.contains(GattCharacteristicProperties::Notify) {
+            GattClientCharacteristicConfigurationDescriptorValue::Notify
+        } else if properties.contains(GattCharacteristicProperties::Indicate) {
+            GattClientCharacteristicConfigurationDescriptorValue::Indicate
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the S200 characteristic does not support notifications or indications",
+            ));
+        };
         let handler = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
             move |_, args| {
                 if let Some(args) = args.as_ref() {
@@ -379,9 +427,7 @@ impl Subscription {
             token: characteristic.ValueChanged(&handler)?,
         };
         let status = characteristic
-            .WriteClientCharacteristicConfigurationDescriptorAsync(
-                GattClientCharacteristicConfigurationDescriptorValue::Notify,
-            )?
+            .WriteClientCharacteristicConfigurationDescriptorAsync(delivery)?
             .join()?;
         check_service_status(status)?;
         Ok(subscription)

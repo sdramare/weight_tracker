@@ -184,26 +184,63 @@
         <div class="diagram" role="region" aria-label="Scrollable weight reading diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="weight-title weight-description">
             <title id="weight-title">Authenticated weight reading</title>
-            <desc id="weight-description">The S200 broadcasts its stabilized measurement. The shared library authenticates and decrypts the MiBeacon packet with the scale’s bind key. The desktop and terminal apps display the weight in kilograms.</desc>
+            <desc id="weight-description">Wake the registered S200 ms113. The shared library opens an authenticated Bluetooth connection with its saved login token. The desktop and terminal apps show live and settled weight in kilograms.</desc>
             <defs>
               <marker id="weight-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
               </marker>
             </defs>
             <rect class="node" x="20" y="22" width="220" height="64" rx="8"/>
-            <text class="node-title" x="130" y="49">Step on the scale</text>
-            <text class="node-detail" x="130" y="69">Wait for the weight to settle</text>
+            <text class="node-title" x="130" y="49">Wake the S200 ms113</text>
+            <text class="node-detail" x="130" y="69">Tap it to start broadcasting</text>
             <path class="arrow" d="M240 54H299" marker-end="url(#weight-arrow)"/>
             <rect class="node" x="304" y="22" width="232" height="64" rx="8"/>
-            <text class="node-title" x="420" y="49">Verify the broadcast</text>
-            <text class="node-detail" x="420" y="69">MiBeacon packet and bind key</text>
+            <text class="node-title" x="420" y="49">Connect over Bluetooth</text>
+            <text class="node-detail" x="420" y="69">Use the saved login token</text>
             <path class="arrow" d="M536 54H595" marker-end="url(#weight-arrow)"/>
             <rect class="node-accent" x="600" y="22" width="220" height="64" rx="8"/>
             <text class="node-title node-inverse" x="710" y="49">Display the weight</text>
-            <text class="node-detail node-inverse" x="710" y="69">Kilograms in the desktop or CLI</text>
+            <text class="node-detail node-inverse" x="710" y="69">Live and settled kilograms</text>
           </svg>
         </div>
-        <figcaption>Set <code>S200_BINDKEY</code> before you launch either app. Use <code>cargo run -- --weight</code> for a single terminal reading. See the <a href="../README.md#read-a-weight">README</a> for setup.</figcaption>
+        <figcaption>Step on the scale after the app connects. Use <code>cargo run -- --weight</code> to read in the terminal. See the <a href="../README.md#read-a-weight">README</a> for MiBeacon weight.</figcaption>
+      </figure>
+    </section>
+
+    <section class="panel" aria-labelledby="registration-heading">
+      <h2 id="registration-heading">Register an S200 ms113</h2>
+      <div class="quick-start">
+        <code class="command">cargo run -- --register-scale</code>
+        <p>Sign in once, then wake the unregistered scale when the terminal starts scanning.</p>
+      </div>
+      <figure>
+        <div class="diagram" role="region" aria-label="Scrollable scale registration diagram" tabindex="0">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="registration-title registration-description">
+            <title id="registration-title">Scale registration in one run</title>
+            <desc id="registration-description">Xiaomi browser sign-in opens a Europe session, the scale exchanges keys over Bluetooth, Xiaomi issues signed authorization, then the scale confirms setup.</desc>
+            <defs>
+              <marker id="registration-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+                <path d="M0 0L9 4L0 8Z" fill="#116650"/>
+              </marker>
+            </defs>
+            <path class="arrow" d="M200 56H218" marker-end="url(#registration-arrow)"/>
+            <path class="arrow" d="M405 56H423" marker-end="url(#registration-arrow)"/>
+            <path class="arrow" d="M610 56H628" marker-end="url(#registration-arrow)"/>
+            <rect class="node" x="15" y="23" width="185" height="66" rx="12"/>
+            <rect class="node" x="220" y="23" width="185" height="66" rx="12"/>
+            <rect class="node" x="425" y="23" width="185" height="66" rx="12"/>
+            <rect class="node-accent" x="630" y="23" width="195" height="66" rx="12"/>
+            <text class="node-title" x="107" y="52">Sign in</text>
+            <text class="node-detail" x="107" y="72">One Xiaomi session</text>
+            <text class="node-title" x="312" y="52">Exchange keys</text>
+            <text class="node-detail" x="312" y="72">Awake S200</text>
+            <text class="node-title" x="517" y="52">Get authorization</text>
+            <text class="node-detail" x="517" y="72">Xiaomi Europe API</text>
+            <text class="node-title node-inverse" x="727" y="52">Confirm setup</text>
+            <text class="node-detail node-inverse" x="727" y="72">Scale replies over BLE</text>
+          </svg>
+        </div>
+        <figcaption>The terminal prints <code>Scale setup complete</code> after the scale confirms registration.</figcaption>
       </figure>
     </section>
 

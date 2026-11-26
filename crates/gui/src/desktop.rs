@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
 use xiaomi_s200::{
-    BluetoothAddress, MODEL_NAME, Scale, ScaleBindKey, discover_scales, discover_scales_with_weight,
+    BluetoothAddress, ConnectedWeightEvent, MODEL_NAME, SavedScaleLogins, Scale, ScaleBindKey,
+    WeightReading, discover_scales, discover_scales_with_weight, listen_for_connected_weight,
 };
 
 const SCAN_DURATION: Duration = Duration::from_secs(30);
@@ -25,7 +26,7 @@ pub fn run() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Xiaomi Scale Discovery",
+        "Xiaomi Smart Scale S200",
         options,
         Box::new(|creation| Ok(Box::new(ScaleApp::new(&creation.egui_ctx)))),
     )
@@ -39,13 +40,17 @@ enum ScanStatus {
 
 enum ScanEvent {
     Scale(Scale),
+    Connecting,
+    Weight(BluetoothAddress, ConnectedWeightEvent),
     Finished(io::Result<()>),
 }
 
 struct ScaleApp {
     scales: BTreeMap<BluetoothAddress, Scale>,
+    readings: BTreeMap<BluetoothAddress, WeightReading>,
     status: ScanStatus,
-    weight_hint: Option<&'static str>,
+    weight_hint: Option<String>,
+    weight_status: Option<&'static str>,
 }
 
 impl ScaleApp {
@@ -56,8 +61,10 @@ impl ScaleApp {
 
         let mut app = Self {
             scales: BTreeMap::new(),
+            readings: BTreeMap::new(),
             status: ScanStatus::Complete,
             weight_hint: None,
+            weight_status: None,
         };
         app.start_scan(context);
         app
@@ -67,34 +74,63 @@ impl ScaleApp {
         let (sender, receiver) = mpsc::channel();
         let context = context.clone();
         self.scales.clear();
-        let key = match ScaleBindKey::from_environment() {
-            Ok(Some(key)) => {
-                self.weight_hint = None;
-                Some(key)
-            }
-            Ok(None) => {
-                self.weight_hint = Some("Set S200_BINDKEY before launching to show weight.");
-                None
-            }
-            Err(_) => {
-                self.weight_hint = Some("S200_BINDKEY must contain 32 hexadecimal digits.");
-                None
-            }
+        self.readings.clear();
+        self.weight_status = None;
+        let logins = SavedScaleLogins::load_default();
+        let bind_key = ScaleBindKey::from_environment();
+        self.weight_hint = match (&logins, &bind_key) {
+            (Ok(logins), _) if !logins.is_empty() => None,
+            (_, Ok(Some(_))) => None,
+            (Err(error), _) | (_, Err(error)) => Some(error.to_string()),
+            _ => Some("Register your S200 to show live weight.".into()),
         };
+        let logins = logins.unwrap_or_default();
+        let bind_key = bind_key.ok().flatten();
         let worker = thread::Builder::new()
             .name("s200-discovery".into())
             .spawn(move || {
+                let mut target = None;
                 let on_scale = |scale: &Scale| {
                     if sender.send(ScanEvent::Scale(scale.clone())).is_err() {
                         return ControlFlow::Break(());
                     }
                     context.request_repaint();
+                    if scale.is_connectable() && logins.token_for(scale).is_some() {
+                        target = Some(scale.clone());
+                        return ControlFlow::Break(());
+                    }
                     ControlFlow::Continue(())
                 };
-                let result = match key {
+                let result = match bind_key {
                     Some(key) => discover_scales_with_weight(SCAN_DURATION, &key, on_scale),
                     None => discover_scales(SCAN_DURATION, on_scale),
                 };
+                let result = result.and_then(|()| {
+                    if let Some(scale) = target
+                        && let Some(token) = logins.token_for(&scale)
+                    {
+                        if sender.send(ScanEvent::Connecting).is_err() {
+                            return Ok(());
+                        }
+                        context.request_repaint();
+                        return listen_for_connected_weight(
+                            &scale,
+                            token,
+                            SCAN_DURATION,
+                            |event| {
+                                if sender
+                                    .send(ScanEvent::Weight(scale.address(), event))
+                                    .is_err()
+                                {
+                                    return ControlFlow::Break(());
+                                }
+                                context.request_repaint();
+                                ControlFlow::Continue(())
+                            },
+                        );
+                    }
+                    Ok(())
+                });
                 let _ = sender.send(ScanEvent::Finished(result));
                 context.request_repaint();
             });
@@ -114,6 +150,15 @@ impl ScaleApp {
             match receiver.try_recv() {
                 Ok(ScanEvent::Scale(scale)) => {
                     self.scales.insert(scale.address(), scale);
+                }
+                Ok(ScanEvent::Connecting) => {
+                    self.weight_status = Some("Connecting to the S200 with its saved login token…");
+                }
+                Ok(ScanEvent::Weight(_, ConnectedWeightEvent::Ready)) => {
+                    self.weight_status = Some("Connected. Step on the S200 and hold still.");
+                }
+                Ok(ScanEvent::Weight(address, ConnectedWeightEvent::Reading(reading))) => {
+                    self.readings.insert(address, reading);
                 }
                 Ok(ScanEvent::Finished(result)) => {
                     self.status = match result {
@@ -137,12 +182,10 @@ impl ScaleApp {
             ScanStatus::Scanning(_) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    let message = if self.weight_hint.is_none() {
-                        "Scanning for 30 seconds. Step on the scale and wait for the reading to settle."
-                    } else {
-                        "Scanning for 30 seconds. Step on the scale to wake it."
-                    };
-                    ui.label(message);
+                    ui.label(
+                        self.weight_status
+                            .unwrap_or("Scanning for 30 seconds. Tap the scale to wake it."),
+                    );
                 });
             }
             ScanStatus::Complete if self.scales.is_empty() => {
@@ -153,18 +196,14 @@ impl ScaleApp {
                 let label = if count == 1 { "scale" } else { "scales" };
                 ui.label(format!("Scan complete. {count} {label} found."));
                 if self.weight_hint.is_none()
+                    && self.readings.is_empty()
                     && self.scales.values().all(|scale| scale.weight().is_none())
                 {
-                    ui.label(
-                        "No authenticated weight arrived. Check the bind key and weigh again.",
-                    );
+                    ui.label("No matching registered scale or authenticated weight arrived.");
                 }
             }
             ScanStatus::Failed(message) => {
-                ui.label(
-                    RichText::new(format!("Bluetooth scan stopped. {message}"))
-                        .color(Color32::DARK_RED),
-                );
+                ui.label(RichText::new(format!("Bluetooth: {message}")).color(Color32::DARK_RED));
             }
         }
     }
@@ -194,13 +233,13 @@ impl eframe::App for ScaleApp {
                 });
                 ui.add_space(15.0);
                 self.status_line(ui);
-                if let Some(hint) = self.weight_hint {
+                if let Some(hint) = &self.weight_hint {
                     ui.label(RichText::new(hint).color(MUTED));
                 }
                 ui.add_space(12.0);
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for scale in self.scales.values() {
-                        scale_row(ui, scale);
+                        scale_row(ui, scale, self.readings.get(&scale.address()).copied());
                         ui.add_space(6.0);
                     }
                 });
@@ -208,7 +247,7 @@ impl eframe::App for ScaleApp {
     }
 }
 
-fn scale_row(ui: &mut egui::Ui, scale: &Scale) {
+fn scale_row(ui: &mut egui::Ui, scale: &Scale, reading: Option<WeightReading>) {
     egui::Frame::new()
         .fill(Color32::WHITE)
         .stroke(egui::Stroke::new(1.0, BORDER))
@@ -223,10 +262,17 @@ fn scale_row(ui: &mut egui::Ui, scale: &Scale) {
                             .monospace()
                             .color(MUTED),
                     );
-                    if let Some(weight) = scale.weight() {
+                    if let Some(reading) =
+                        reading.or_else(|| scale.weight().map(WeightReading::Settled))
+                    {
+                        let (label, weight) = match reading {
+                            WeightReading::Live(weight) => ("Live weight", weight),
+                            WeightReading::Settled(weight) => ("Settled weight", weight),
+                        };
                         ui.label(
-                            RichText::new(format!("Last weight  {weight}"))
+                            RichText::new(format!("{label}  {weight}"))
                                 .strong()
+                                .size(19.0)
                                 .color(ACCENT),
                         );
                     }

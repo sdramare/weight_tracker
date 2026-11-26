@@ -1,14 +1,44 @@
 mod certificate_transfer;
+mod connected_weight;
+mod registration;
 mod registration_crypto;
 
+use std::ops::ControlFlow;
+use std::time::Duration;
 use std::{fmt, io};
 
 use windows::Devices::Bluetooth::GenericAttributeProfile::{GattCharacteristic, GattDeviceService};
 use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice, BluetoothUuidHelper};
 
-use super::{Apartment, Scale, check_service_status, open_scale_device};
+use super::{Apartment, Scale, check_service_status, discover_scales, open_scale_device};
 
 pub use certificate_transfer::{SetupCertificateReply, send_setup_test_certificate};
+pub use connected_weight::{ConnectedWeightEvent, listen_for_connected_weight};
+pub use registration::{
+    RegisteredScale, RegistrationEvent, RegistrationStep, register_scale_europe,
+};
+
+/// Finds the first connectable S200 ms113 that requests Standard Auth registration.
+pub fn find_registration_scale(duration: Duration) -> io::Result<Scale> {
+    let mut candidate = None;
+    discover_scales(duration, |scale| {
+        if scale.is_connectable()
+            && scale
+                .setup_info()
+                .is_some_and(|info| info.requests_certificate_test())
+        {
+            candidate = Some(scale.clone());
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })?;
+    candidate.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no connectable, unregistered S200 ms113 requested setup",
+        )
+    })
+}
 
 /// Connects to the scale and checks for the Xiaomi Standard Auth characteristic.
 pub fn probe_setup_service(scale: &Scale) -> io::Result<()> {
@@ -78,9 +108,13 @@ enum Authentication {
 }
 
 impl ScaleSetupInfo {
+    pub(crate) fn is_ms113(&self) -> bool {
+        self.product_id == 0x4dcb
+    }
+
     /// The supported variant is unregistered and currently requesting Standard Auth setup.
     pub fn requests_certificate_test(&self) -> bool {
-        self.product_id == 0x4dcb
+        self.is_ms113()
             && matches!(
                 self.flags,
                 Some(SetupFlags {

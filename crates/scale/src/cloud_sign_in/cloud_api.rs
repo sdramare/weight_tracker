@@ -6,6 +6,7 @@ use rand_core::{OsRng, RngCore};
 use sha1::{Digest as _, Sha1};
 use sha2::{Digest as _, Sha256};
 use url::form_urlencoded;
+use windows::Data::Json::{JsonObject, JsonValue};
 use windows::Win32::Foundation::NTSTATUS;
 use windows::Win32::Security::Cryptography::{
     BCRYPT_FLAGS, BCRYPT_KEY_HANDLE, BCRYPT_RC4_ALG_HANDLE, BCryptDestroyKey, BCryptEncrypt,
@@ -23,12 +24,21 @@ pub(super) fn verify_device_count(
     client: &https::Session,
     account: &CloudAccount,
 ) -> io::Result<()> {
+    signed_request(client, account, DEVICE_COUNT_PATH, DEVICE_COUNT_QUERY).map(|_| ())
+}
+
+pub(super) fn signed_request(
+    client: &https::Session,
+    account: &CloudAccount,
+    path: &str,
+    data: &str,
+) -> io::Result<JsonValue> {
     let user_id = account
         .user_id
         .as_deref()
         .ok_or_else(|| io::Error::other("Xiaomi's sign-in response is missing the account ID"))?;
-    let url = secure_url(&format!("{EUROPE_API}{DEVICE_COUNT_PATH}"))?;
-    let request = DeviceCountRequest::new(&account.security, request_nonce()?)?;
+    let url = secure_url(&format!("{EUROPE_API}{path}"))?;
+    let request = SignedRequest::new(path, data, &account.security, request_nonce()?)?;
     let token = &account.service_token;
     let headers = format!(
         "Content-Type: application/x-www-form-urlencoded\r\n\
@@ -41,26 +51,30 @@ pub(super) fn verify_device_count(
         .post_form(&url, &headers, &request.form, REQUEST_TIMEOUT)
         .map_err(|error| super::request_error("reach Xiaomi's Europe API", error))?;
     response.require_ok("Europe cloud API")?;
-    request.check_reply(&response.body)
+    request.result(&response.body)
 }
 
-struct DeviceCountRequest {
+struct SignedRequest {
     form: String,
     key: [u8; 32],
 }
 
-impl DeviceCountRequest {
-    fn new(security: &str, nonce: [u8; 12]) -> io::Result<Self> {
+impl SignedRequest {
+    fn new(path: &str, data: &str, security: &str, nonce: [u8; 12]) -> io::Result<Self> {
         let decoded = decode_base64(security, "Xiaomi returned invalid session material")?;
         let mut digest = Sha256::new();
         digest.update(decoded);
         digest.update(nonce);
         let key: [u8; 32] = digest.finalize().into();
         let signed_nonce = Base64::encode_string(&key);
-        let hash = signature(&[("data", DEVICE_COUNT_QUERY)], &signed_nonce);
-        let data = Base64::encode_string(&rc4_drop(&key, DEVICE_COUNT_QUERY.as_bytes())?);
+        let hash = signature(path, &[("data", data)], &signed_nonce);
+        let data = Base64::encode_string(&rc4_drop(&key, data.as_bytes())?);
         let hash = Base64::encode_string(&rc4_drop(&key, hash.as_bytes())?);
-        let signature = signature(&[("data", &data), ("rc4_hash__", &hash)], &signed_nonce);
+        let signature = signature(
+            path,
+            &[("data", &data), ("rc4_hash__", &hash)],
+            &signed_nonce,
+        );
         let form = form_urlencoded::Serializer::new(String::new())
             .append_pair("data", &data)
             .append_pair("rc4_hash__", &hash)
@@ -71,7 +85,7 @@ impl DeviceCountRequest {
         Ok(Self { form, key })
     }
 
-    fn check_reply(&self, body: &[u8]) -> io::Result<()> {
+    fn result(&self, body: &[u8]) -> io::Result<JsonValue> {
         let message = "Xiaomi's Europe API returned an unexpected response";
         let json = match xiaomi_json(body) {
             Ok(json) => json,
@@ -83,14 +97,16 @@ impl DeviceCountRequest {
             }
         };
         match cloud_code(&json) {
-            Some(0) if json.HasKey(&HSTRING::from("result"))? => Ok(()),
+            Some(0) => json
+                .GetNamedValue(&HSTRING::from("result"))
+                .map_err(|_| io::Error::other(message)),
             Some(code) if code != 0 => Err(cloud_rejection(code)),
             _ => Err(io::Error::other(message)),
         }
     }
 }
 
-fn cloud_code(json: &windows::Data::Json::JsonObject) -> Option<i32> {
+fn cloud_code(json: &JsonObject) -> Option<i32> {
     json.GetNamedValue(&HSTRING::from("code"))
         .and_then(|value| value.Stringify())
         .ok()?
@@ -123,10 +139,10 @@ fn request_nonce() -> io::Result<[u8; 12]> {
     Ok(nonce)
 }
 
-fn signature(fields: &[(&str, &str)], signed_nonce: &str) -> String {
+fn signature(path: &str, fields: &[(&str, &str)], signed_nonce: &str) -> String {
     let mut digest = Sha1::new();
     digest.update(b"POST&");
-    digest.update(DEVICE_COUNT_PATH);
+    digest.update(path);
     for (name, value) in fields {
         digest.update(b"&");
         digest.update(name);
@@ -196,14 +212,20 @@ impl Drop for Rc4Key {
 mod tests {
     use url::form_urlencoded;
 
-    use super::DeviceCountRequest;
+    use super::{DEVICE_COUNT_PATH, DEVICE_COUNT_QUERY, SignedRequest};
     use crate::Apartment;
 
     #[test]
     fn signs_the_device_count_request_and_checks_the_encrypted_reply() {
         let _apartment = Apartment::initialize().unwrap();
         let nonce = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-        let request = DeviceCountRequest::new("EBESExQVFhcYGRobHB0eHw==", nonce).unwrap();
+        let request = SignedRequest::new(
+            DEVICE_COUNT_PATH,
+            DEVICE_COUNT_QUERY,
+            "EBESExQVFhcYGRobHB0eHw==",
+            nonce,
+        )
+        .unwrap();
         let fields: Vec<_> = form_urlencoded::parse(request.form.as_bytes()).collect();
         let expected = [
             (
@@ -222,10 +244,10 @@ mod tests {
         }
         assert!(
             request
-                .check_reply(b"FcmPXxOeYHtFd8nP5iiNIy4UWs0wUqDIo8orcO6R6g==")
+                .result(b"FcmPXxOeYHtFd8nP5iiNIy4UWs0wUqDIo8orcO6R6g==")
                 .is_ok()
         );
-        let rejected = request.check_reply(br#"{"code":3}"#).unwrap_err();
+        let rejected = request.result(br#"{"code":3}"#).unwrap_err();
         assert!(rejected.to_string().contains("code 3"));
     }
 }

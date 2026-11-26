@@ -5,6 +5,7 @@
 mod cloud_sign_in;
 mod diagnostics;
 mod discovery;
+mod login_keys;
 mod setup;
 mod types;
 mod weight;
@@ -21,10 +22,15 @@ use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUnini
 
 pub use cloud_sign_in::{XiaomiSignInLink, verify_xiaomi_cloud_europe, verify_xiaomi_sign_in};
 pub use diagnostics::{SetupCheck, SetupCheckStatus, check_scale_setup};
+pub use login_keys::{SavedScaleLogins, ScaleLoginToken};
 pub use setup::{
-    ScaleSetupInfo, SetupCertificateReply, probe_setup_service, send_setup_test_certificate,
+    ConnectedWeightEvent, RegisteredScale, RegistrationEvent, RegistrationStep, ScaleSetupInfo,
+    SetupCertificateReply, find_registration_scale, listen_for_connected_weight,
+    probe_setup_service, register_scale_europe, send_setup_test_certificate,
 };
-pub use types::{BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight};
+pub use types::{
+    BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight, WeightReading,
+};
 pub use weight::ScaleBindKey;
 use weight::WeightDecoder;
 

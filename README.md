@@ -1,6 +1,6 @@
 # Xiaomi S200 Bluetooth tools
 
-A Rust workspace for the Xiaomi Smart Scale S200 on Windows. The desktop app lists nearby scales and their signal strength. The CLI connects to the first scale that offers a connection and prints its GATT service UUIDs.
+A Rust workspace for the Xiaomi Smart Scale S200 on Windows. The desktop app lists nearby scales and shows live and settled weight from a registered S200 ms113. The CLI also supports GATT inspection and scale setup.
 
 ## Requirements
 
@@ -29,9 +29,16 @@ The second command extends the default 30-second discovery timeout. If the CLI s
 
 ## Read a weight
 
-Use the 32-digit hexadecimal MiBeacon bind key for your scale. [Home Assistant’s Xiaomi BLE guide](https://www.home-assistant.io/integrations/xiaomi_ble/#encryption) describes how to obtain it for a device bound to your Xiaomi account.
+For an S200 ms113 registered by this program, open the desktop app or run the terminal reader from the project folder.
 
-In PowerShell, enter the key and launch the desktop app in the same session.
+```powershell
+cargo run -p blt_unlock_gui
+cargo run -- --weight
+```
+
+Tap the scale to wake it. Once the app says it is connected, step on the scale and hold still. The app shows the live value and the settled reading in kilograms. It uses the Bluetooth login token saved in `target/s200-registration` during setup. [S200 Bluetooth protocol capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#data-channel)
+
+For a scale that broadcasts authenticated MiBeacon weight, you can use its 32-digit bind key instead. [Home Assistant’s Xiaomi BLE guide](https://www.home-assistant.io/integrations/xiaomi_ble/#encryption)
 
 ```powershell
 $key = Read-Host 'S200 bind key' -AsSecureString
@@ -39,13 +46,16 @@ $env:S200_BINDKEY = [System.Net.NetworkCredential]::new('', $key).Password
 cargo run -p blt_unlock_gui
 ```
 
-Step on the scale during a scan and wait for its display to settle. The desktop app shows the latest stabilized weight in kilograms. Weight display requires the scale to transmit its measurement in a MiBeacon v4 or v5 advertisement.
 
-With the same environment variable set, the CLI prints the first authenticated reading it receives.
+## Register an S200 ms113
 
 ```powershell
-cargo run -- --weight --seconds 45
+cargo run -- --register-scale
 ```
+
+Sign in once using the link from Xiaomi. When the Bluetooth scan starts, step on the unregistered S200 you want to register. The CLI reuses the Europe session to allocate a device ID and request Xiaomi's signed authorization during the Bluetooth handshake.
+
+Wait for `Scale setup complete`. That message means the scale itself confirmed setup. The CLI prints the path to the local keys in `target/s200-registration` before sending the authorization over Bluetooth so the keys are available if the response is interrupted.
 
 ## Inspect scale setup
 

@@ -2999,6 +2999,7 @@ dependencies = [
  "base64ct",
  "ccm",
  "hkdf",
+ "hmac",
  "p256",
  "rand_core",
  "sha1",

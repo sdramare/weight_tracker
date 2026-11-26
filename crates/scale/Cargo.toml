@@ -8,6 +8,7 @@ aes = "0.8.4"
 base64ct = { version = "1.8.3", features = ["alloc"] }
 ccm = { version = "0.5.0", default-features = false }
 hkdf = "0.12.4"
+hmac = "0.12.1"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdh", "std"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 sha1 = { version = "0.11.0", default-features = false }

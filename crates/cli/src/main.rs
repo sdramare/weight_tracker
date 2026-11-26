@@ -1,12 +1,14 @@
 use std::process::ExitCode;
 
 const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --setup-test-cert | --check-setup] [--seconds <1-60>]\n\
+    blt_unlock --register-scale [--seconds <1-60>]\n\
     blt_unlock --xiaomi-sign-in | --xiaomi-check-cloud\n\
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
-    Use --weight with S200_BINDKEY set to wait for a stabilized weight.\n\
+    Use --weight to read from an S200 using its saved setup token or S200_BINDKEY.\n\
     Use --setup-info to inspect the setup information in S200 broadcasts.\n\
     Use --setup-test-cert to try Standard Auth setup with the bundled test certificate.\n\
     Use --check-setup for Bluetooth and Xiaomi account checks in one run.\n\
+    Use --register-scale to sign in once and register an unregistered S200 ms113.\n\
     Use --xiaomi-sign-in to verify Xiaomi account authorization in your browser.\n\
     Use --xiaomi-check-cloud to verify the session against Xiaomi's Europe API.\n\
     The discovery timeout defaults to 30 seconds.";
@@ -18,6 +20,7 @@ enum Command {
     SetupInfo,
     SetupTestCertificate,
     SetupCheck,
+    RegisterScale,
     XiaomiSignIn,
     XiaomiCloudCheck,
 }
@@ -54,6 +57,7 @@ fn main() -> ExitCode {
                 command = Some(Command::SetupTestCertificate)
             }
             Some("--check-setup") if command.is_none() => command = Some(Command::SetupCheck),
+            Some("--register-scale") if command.is_none() => command = Some(Command::RegisterScale),
             Some("--xiaomi-sign-in") if command.is_none() => command = Some(Command::XiaomiSignIn),
             Some("--xiaomi-check-cloud") if command.is_none() => {
                 command = Some(Command::XiaomiCloudCheck)
@@ -102,6 +106,7 @@ fn run(seconds: u64, command: Command) -> ExitCode {
             "Scale setup test incomplete",
         ),
         Command::SetupCheck => return check_setup(duration),
+        Command::RegisterScale => (register_scale(duration), "Scale registration incomplete"),
         Command::XiaomiSignIn => (show_xiaomi_sign_in(), "Xiaomi sign-in incomplete"),
         Command::XiaomiCloudCheck => (check_xiaomi_cloud(), "Xiaomi cloud check incomplete"),
     };
@@ -197,29 +202,65 @@ fn show_connection(duration: std::time::Duration) -> std::io::Result<()> {
 fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
     use std::io;
     use std::ops::ControlFlow;
+    use xiaomi_s200::{ConnectedWeightEvent, SavedScaleLogins, WeightReading};
 
-    let key = xiaomi_s200::ScaleBindKey::from_environment()?.ok_or_else(|| {
-        io::Error::new(
+    let logins = SavedScaleLogins::load_default()?;
+    let bind_key = match xiaomi_s200::ScaleBindKey::from_environment() {
+        Err(_) if !logins.is_empty() => None,
+        result => result?,
+    };
+    if logins.is_empty() && bind_key.is_none() {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Set S200_BINDKEY to the scale's MiBeacon bind key.",
-        )
-    })?;
+            "No saved S200 login token. Register the scale or set S200_BINDKEY for MiBeacon weight.",
+        ));
+    }
     println!(
-        "Listening for weight for up to {} seconds. Step on the scale and wait for the reading to settle.",
+        "Looking for the S200 for up to {} seconds. Tap it to wake it.",
         duration.as_secs()
     );
+    let mut target = None;
     let mut reading = None;
-    xiaomi_s200::discover_scales_with_weight(duration, &key, |scale| {
+    let on_scale = |scale: &xiaomi_s200::Scale| {
+        if scale.is_connectable() && logins.token_for(scale).is_some() {
+            target = Some(scale.clone());
+            return ControlFlow::Break(());
+        }
         if let Some(weight) = scale.weight() {
             reading = Some((scale.address(), weight));
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
-    })?;
+    };
+    if let Some(key) = bind_key {
+        xiaomi_s200::discover_scales_with_weight(duration, &key, on_scale)?;
+    } else {
+        xiaomi_s200::discover_scales(duration, on_scale)?;
+    }
+    if let Some(scale) = target
+        && let Some(token) = logins.token_for(&scale)
+    {
+        let address = scale.address();
+        println!("Connecting to {address} with its saved login token...");
+        return xiaomi_s200::listen_for_connected_weight(&scale, token, duration, |event| {
+            match event {
+                ConnectedWeightEvent::Ready => {
+                    println!("Connected. Step on the scale and hold still.")
+                }
+                ConnectedWeightEvent::Reading(WeightReading::Live(weight)) => {
+                    println!("{address}  {weight} (live)");
+                }
+                ConnectedWeightEvent::Reading(WeightReading::Settled(weight)) => {
+                    println!("{address}  {weight} (settled)");
+                }
+            }
+            ControlFlow::Continue(())
+        });
+    }
     let (address, weight) = reading.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::TimedOut,
-            "No authenticated weight arrived. Check the bind key and weigh again.",
+            "No S200 with matching saved keys or authenticated weight was found during the scan.",
         )
     })?;
     println!("{address}  {weight}");
@@ -263,33 +304,45 @@ fn run(_seconds: u64, _command: Command) -> ExitCode {
 }
 
 #[cfg(windows)]
+fn register_scale(duration: std::time::Duration) -> std::io::Result<()> {
+    use xiaomi_s200::{RegistrationEvent, RegistrationStep};
+
+    let credentials = std::env::current_dir()?.join("target/s200-registration");
+    let scale = xiaomi_s200::register_scale_europe(
+        duration,
+        &credentials,
+        present_xiaomi_link,
+        |event| match event {
+            RegistrationEvent::Started(step) => {
+                println!("[RUN]  {step}");
+                if step == RegistrationStep::ScaleDiscovery {
+                    println!(
+                        "Step on the S200 you want to register. The Bluetooth scan lasts up to {} seconds.",
+                        duration.as_secs()
+                    );
+                }
+            }
+            RegistrationEvent::Passed(step) => println!("[PASS] {step}"),
+            RegistrationEvent::CredentialsSaved(path) => {
+                println!("S200 keys saved locally in {}.", path.display());
+            }
+        },
+    )?;
+    println!("Scale setup complete for {}.", scale.address());
+    Ok(())
+}
+
+#[cfg(windows)]
 fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result<()> {
+    use std::io;
     use std::path::Path;
-    use std::{io, ops::ControlFlow};
     use xiaomi_s200::SetupCertificateReply;
 
     println!(
         "Looking for an unregistered S200 ms113 for up to {} seconds. Step on the scale to wake it.",
         duration.as_secs()
     );
-    let mut candidate = None;
-    xiaomi_s200::discover_scales(duration, |scale| {
-        if scale.is_connectable()
-            && scale
-                .setup_info()
-                .is_some_and(|info| info.requests_certificate_test())
-        {
-            candidate = Some(scale.clone());
-            return ControlFlow::Break(());
-        }
-        ControlFlow::Continue(())
-    })?;
-    let scale = candidate.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "no connectable, unregistered S200 ms113 requested setup",
-        )
-    })?;
+    let scale = xiaomi_s200::find_registration_scale(duration)?;
     if let Some(info) = scale.setup_info() {
         println!("{info}");
     }
