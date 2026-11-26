@@ -59,10 +59,11 @@ impl Watcher {
         let received_sender = sender.clone();
         watcher.received = Some(watcher.inner.Received(&ReceivedHandler::new(
             move |_, args| {
-                if let Some(args) = args.as_ref() {
-                    if let Ok(Some(advertisement)) = read_advertisement(args) {
-                        let _ = received_sender.send(Event::Advertisement(advertisement));
-                    }
+                let Some(args) = args.as_ref() else {
+                    return Ok(());
+                };
+                if let Ok(Some(advertisement)) = read_advertisement(args) {
+                    let _ = received_sender.send(Event::Advertisement(advertisement));
                 }
                 Ok(())
             },
