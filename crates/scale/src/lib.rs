@@ -17,7 +17,7 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatu
 use windows::Devices::Bluetooth::{BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
-pub use setup::ScaleSetupInfo;
+pub use setup::{ScaleSetupInfo, check_setup_test_certificate, probe_setup_service};
 pub use types::{BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight};
 pub use weight::ScaleBindKey;
 use weight::WeightDecoder;
@@ -109,6 +109,21 @@ pub fn find_connectable_scale(duration: Duration) -> io::Result<Scale> {
 /// Connects to the scale and returns the UUIDs of its GATT services.
 pub fn read_services(scale: &Scale) -> io::Result<Vec<GattServiceUuid>> {
     let _apartment = Apartment::initialize()?;
+    let device = open_scale_device(scale)?;
+
+    // Uncached discovery contacts the scale over Bluetooth and verifies the connection.
+    let result = device
+        .GetGattServicesWithCacheModeAsync(BluetoothCacheMode::Uncached)?
+        .join()?;
+    check_service_status(result.Status()?)?;
+
+    let services = result.Services()?;
+    (0..services.Size()?)
+        .map(|index| Ok(GattServiceUuid(services.GetAt(index)?.Uuid()?)))
+        .collect()
+}
+
+fn open_scale_device(scale: &Scale) -> io::Result<BluetoothLEDevice> {
     let device = match scale.address_type {
         Some(kind) => BluetoothLEDevice::FromBluetoothAddressWithBluetoothAddressTypeAsync(
             scale.address.0,
@@ -118,12 +133,10 @@ pub fn read_services(scale: &Scale) -> io::Result<Vec<GattServiceUuid>> {
     }
     .join()
     .map_err(|error| io::Error::other(format!("Windows could not open the BLE device: {error}")))?;
+    Ok(device)
+}
 
-    // Uncached discovery contacts the scale over Bluetooth and verifies the connection.
-    let result = device
-        .GetGattServicesWithCacheModeAsync(BluetoothCacheMode::Uncached)?
-        .join()?;
-    let status = result.Status()?;
+fn check_service_status(status: GattCommunicationStatus) -> io::Result<()> {
     match status {
         GattCommunicationStatus::Success => {}
         GattCommunicationStatus::Unreachable => {
@@ -143,10 +156,7 @@ pub fn read_services(scale: &Scale) -> io::Result<Vec<GattServiceUuid>> {
         }
     }
 
-    let services = result.Services()?;
-    (0..services.Size()?)
-        .map(|index| Ok(GattServiceUuid(services.GetAt(index)?.Uuid()?)))
-        .collect()
+    Ok(())
 }
 
 struct Apartment(PhantomData<Rc<()>>);

@@ -1,4 +1,39 @@
-use std::fmt;
+mod certificate;
+
+use std::{fmt, io};
+
+use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothUuidHelper};
+
+use super::{Apartment, Scale, check_service_status, open_scale_device};
+
+pub use certificate::check_setup_test_certificate;
+
+/// Connects to the scale and checks for the Xiaomi Standard Auth characteristic.
+pub fn probe_setup_service(scale: &Scale) -> io::Result<()> {
+    let _apartment = Apartment::initialize()?;
+    let device = open_scale_device(scale)?;
+    let service_uuid = BluetoothUuidHelper::FromShortId(0xfe95)?;
+    let auth_uuid = BluetoothUuidHelper::FromShortId(0x0019)?;
+    let result = device
+        .GetGattServicesForUuidWithCacheModeAsync(service_uuid, BluetoothCacheMode::Uncached)?
+        .join()?;
+    check_service_status(result.Status()?)?;
+    let services = result.Services()?;
+    for index in 0..services.Size()? {
+        let result = services
+            .GetAt(index)?
+            .GetCharacteristicsForUuidWithCacheModeAsync(auth_uuid, BluetoothCacheMode::Uncached)?
+            .join()?;
+        check_service_status(result.Status()?)?;
+        if result.Characteristics()?.Size()? > 0 {
+            return Ok(());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "the scale did not expose the Xiaomi Standard Auth characteristic",
+    ))
+}
 
 /// Product and setup information advertised by a Xiaomi Smart Scale S200.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -57,6 +57,14 @@ Step on the scale during the scan. This read-only command reports the advertised
 
 A capture of first-time registration on the S200 `ms113` shows a key exchange and a Xiaomi Cloud certificate. The capture documents this firmware variant and provides a starting point for a Rust setup flow. [S200 registration capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#registration-for-completeness-not-needed-in-practice)
 
+Run the certificate and Bluetooth setup checks together.
+
+```powershell
+cargo run -- --setup-test-cert --seconds 30
+```
+
+The CLI validates the bundled self-signed DER certificate in memory using the Mijia Root from Xiaomi Home 11.9.705 as its sole trust anchor. A chain rejection is expected. The CLI then connects to the scale and checks for the Standard Auth characteristic. This is a read-only setup diagnostic.
+
 ## Build and test
 
 ```powershell
