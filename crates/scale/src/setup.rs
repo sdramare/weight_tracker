@@ -13,7 +13,9 @@ use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice, Bluetoo
 use super::{Apartment, Scale, check_service_status, discover_scales, open_scale_device};
 
 pub use certificate_transfer::{SetupCertificateReply, send_setup_test_certificate};
-pub use connected_weight::{ConnectedWeightEvent, listen_for_connected_weight};
+pub use connected_weight::{
+    ConnectedWeightEvent, listen_for_connected_weight, watch_connected_weights,
+};
 pub use registration::{
     RegisteredScale, RegistrationEvent, RegistrationStep, register_scale_europe,
 };

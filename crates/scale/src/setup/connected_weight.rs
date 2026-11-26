@@ -14,6 +14,7 @@ use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic;
+use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothLEDevice};
 
 use super::certificate_transfer::{
     Channel, FRAGMENTS_RECEIVED, READY, Subscription, TRANSFER_FAILED, block_packets,
@@ -28,6 +29,8 @@ const APP_PROOF: u8 = 0x0a;
 const SCALE_RANDOM: u8 = 0x0d;
 const SCALE_PROOF: u8 = 0x0c;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(8);
+const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+const CONNECTION_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 type Notification = (Channel, Vec<u8>);
 type WeightCipher = Ccm<Aes128, U4, U12>;
@@ -45,8 +48,32 @@ pub fn listen_for_connected_weight(
     scale: &Scale,
     token: &ScaleLoginToken,
     measurement_time: Duration,
+    report: impl FnMut(ConnectedWeightEvent) -> ControlFlow<()>,
+) -> io::Result<()> {
+    read_connected_weights(scale, token, Some(measurement_time), || true, report)
+}
+
+/// Reads consecutive weights until the scale sleeps, the data channel is idle,
+/// or the caller stops listening.
+pub fn watch_connected_weights(
+    scale: &Scale,
+    token: &ScaleLoginToken,
+    keep_listening: impl Fn() -> bool,
+    report: impl FnMut(ConnectedWeightEvent) -> ControlFlow<()>,
+) -> io::Result<()> {
+    read_connected_weights(scale, token, None, keep_listening, report)
+}
+
+fn read_connected_weights(
+    scale: &Scale,
+    token: &ScaleLoginToken,
+    measurement_time: Option<Duration>,
+    keep_listening: impl Fn() -> bool,
     mut report: impl FnMut(ConnectedWeightEvent) -> ControlFlow<()>,
 ) -> io::Result<()> {
+    if !keep_listening() {
+        return Ok(());
+    }
     let _apartment = Apartment::initialize()?;
     let device = open_scale_device(scale)?;
     let service = setup_service(&device)?;
@@ -65,29 +92,79 @@ pub fn listen_for_connected_weight(
     if report(ConnectedWeightEvent::Ready).is_break() {
         return Ok(());
     }
-    let deadline = Instant::now()
-        .checked_add(measurement_time)
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "invalid measurement timeout")
-        })?;
+    let deadline = measurement_time
+        .map(|duration| {
+            Instant::now().checked_add(duration).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid measurement timeout")
+            })
+        })
+        .transpose()?;
     let cipher = WeightCipher::new((&keys.device_key).into());
     let mut previous = None;
     loop {
-        let payload = receive_framed_block(&data, None, "weight packet", || {
-            read_notification(&data_replies, deadline, "a settled weight").map(|(_, packet)| packet)
-        })?;
+        let payload = if let Some(deadline) = deadline {
+            receive_framed_block(&data, None, "weight packet", || {
+                read_notification(&data_replies, deadline, "a settled weight")
+                    .map(|(_, packet)| packet)
+            })?
+        } else {
+            let idle_deadline = Instant::now() + CONNECTION_IDLE_TIMEOUT;
+            match receive_framed_block(&data, None, "weight packet", || {
+                next_live_packet(&device, &data_replies, idle_deadline, &keep_listening)
+            }) {
+                Ok(payload) => payload,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotConnected
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                            | io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        };
         if let Some(reading) = decode_weight(&cipher, keys.device_iv, &payload) {
-            if previous != Some(reading)
+            let settled = matches!(reading, WeightReading::Settled(_));
+            if (settled || previous != Some(reading))
                 && report(ConnectedWeightEvent::Reading(reading)).is_break()
             {
                 return Ok(());
             }
-            if matches!(reading, WeightReading::Settled(_)) {
+            if settled && deadline.is_some() {
                 return Ok(());
             }
             previous = Some(reading);
         }
     }
+}
+
+fn next_live_packet(
+    device: &BluetoothLEDevice,
+    receiver: &Receiver<Notification>,
+    deadline: Instant,
+    keep_listening: &dyn Fn() -> bool,
+) -> io::Result<Vec<u8>> {
+    while keep_listening() {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+        match receiver.recv_timeout(remaining.min(CONNECTION_CHECK_INTERVAL)) {
+            Ok((_, packet)) => return Ok(packet),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if device.ConnectionStatus()? == BluetoothConnectionStatus::Disconnected {
+                    return Err(io::Error::from(io::ErrorKind::NotConnected));
+                }
+            }
+        }
+    }
+    Err(io::Error::from(io::ErrorKind::Interrupted))
 }
 
 fn login(

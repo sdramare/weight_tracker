@@ -82,7 +82,7 @@
       <p class="intro">The desktop and terminal apps share a Rust library for finding the S200 over Bluetooth Low Energy.</p>
       <div class="quick-start">
         <code class="command">cargo run -p blt_unlock_gui</code>
-        <p>Open the desktop app and see scales as they appear.</p>
+        <p>Open the desktop app and keep listening for scales and weigh-ins.</p>
       </div>
       <div class="quick-start">
         <code class="command">cargo run</code>
@@ -174,7 +174,7 @@
             <text class="node-detail" x="589" y="208">Name, Bluetooth address, signal strength, and connectability</text>
           </svg>
         </div>
-        <figcaption>The desktop app scans for 30 seconds each time. The terminal app also defaults to 30 seconds, which you can change with <code>cargo run -- --seconds 45</code>.</figcaption>
+        <figcaption>The desktop app listens while its window is open. The terminal scan defaults to 30 seconds, which you can change with <code>cargo run -- --seconds 45</code>.</figcaption>
       </figure>
     </section>
 
@@ -184,15 +184,15 @@
         <div class="diagram" role="region" aria-label="Scrollable weight reading diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="weight-title weight-description">
             <title id="weight-title">Authenticated weight reading</title>
-            <desc id="weight-description">Wake the registered S200 ms113. The shared library opens an authenticated Bluetooth connection with its saved login token. The desktop and terminal apps show live and settled weight in kilograms.</desc>
+            <desc id="weight-description">Step on the registered S200 ms113. The app connects as soon as it receives a connectable Bluetooth advertisement, authenticates with the saved login token, and shows live and settled weight. The desktop app resumes listening when the scale sleeps.</desc>
             <defs>
               <marker id="weight-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
               </marker>
             </defs>
             <rect class="node" x="20" y="22" width="220" height="64" rx="8"/>
-            <text class="node-title" x="130" y="49">Wake the S200 ms113</text>
-            <text class="node-detail" x="130" y="69">Tap it to start broadcasting</text>
+            <text class="node-title" x="130" y="49">Step on the scale</text>
+            <text class="node-detail" x="130" y="69">The app is already listening</text>
             <path class="arrow" d="M240 54H299" marker-end="url(#weight-arrow)"/>
             <rect class="node" x="304" y="22" width="232" height="64" rx="8"/>
             <text class="node-title" x="420" y="49">Connect over Bluetooth</text>
@@ -203,7 +203,7 @@
             <text class="node-detail node-inverse" x="710" y="69">Live and settled kilograms</text>
           </svg>
         </div>
-        <figcaption>Step on the scale after the app connects. Use <code>cargo run -- --weight</code> to read in the terminal. See the <a href="../README.md#read-a-weight">README</a> for MiBeacon weight.</figcaption>
+        <figcaption>The desktop app keeps the last settled reading visible and resumes listening when the scale sleeps. Use <code>cargo run -- --weight</code> for one reading in the terminal. See the <a href="../README.md#read-a-weight">README</a> for MiBeacon weight.</figcaption>
       </figure>
     </section>
 
@@ -278,7 +278,7 @@
       <div class="help">
         <p><strong>Scale missing</strong>Wake it while the app is listening.</p>
         <p><strong>Scale unreachable</strong>Close Xiaomi Home if it is connected, then wake the scale again.</p>
-        <p><strong>Bluetooth unavailable</strong>Turn Bluetooth on and run from Windows Terminal.</p>
+        <p><strong>Bluetooth unavailable</strong>Turn Bluetooth on. The desktop app retries automatically.</p>
       </div>
     </section>
 

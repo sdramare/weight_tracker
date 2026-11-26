@@ -15,6 +15,9 @@ use windows::Storage::Streams::DataReader;
 
 use super::{BluetoothAddress, Scale, ScaleSetupInfo, SignalStrength, Weight, WeightDecoder};
 
+const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const CANDIDATE_LIFETIME: Duration = Duration::from_secs(30);
+
 struct Advertisement {
     address: BluetoothAddress,
     is_s200: bool,
@@ -29,6 +32,21 @@ struct Advertisement {
 struct Candidate {
     is_s200: bool,
     scale: Scale,
+    last_seen: Instant,
+}
+
+enum ScanWindow<'a> {
+    Timed(Instant),
+    Continuous(&'a dyn Fn() -> bool),
+}
+
+impl ScanWindow<'_> {
+    fn next_wait(&self) -> Option<Duration> {
+        match self {
+            Self::Timed(deadline) => deadline.checked_duration_since(Instant::now()),
+            Self::Continuous(keep_listening) => keep_listening().then_some(STOP_CHECK_INTERVAL),
+        }
+    }
 }
 
 enum Event {
@@ -107,21 +125,47 @@ pub(super) fn discover(
     decoder: Option<WeightDecoder>,
     on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
+    let deadline = Instant::now()
+        .checked_add(duration)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid scan duration"))?;
+    run_scan(ScanWindow::Timed(deadline), decoder, on_scale)
+}
+
+pub(super) fn watch(
+    decoder: Option<WeightDecoder>,
+    keep_listening: impl Fn() -> bool,
+    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+) -> io::Result<()> {
+    run_scan(ScanWindow::Continuous(&keep_listening), decoder, on_scale)
+}
+
+fn run_scan(
+    window: ScanWindow<'_>,
+    decoder: Option<WeightDecoder>,
+    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+) -> io::Result<()> {
     let (sender, receiver) = mpsc::channel();
     let watcher = Watcher::start(sender, decoder)?;
-    let result = wait_for_scales(duration, receiver, on_scale);
+    let result = wait_for_scales(window, receiver, on_scale);
     result.and(watcher.stop())
 }
 
 fn wait_for_scales(
-    duration: Duration,
+    window: ScanWindow<'_>,
     receiver: Receiver<Event>,
     mut on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + duration;
     let mut candidates = HashMap::<BluetoothAddress, Candidate>::new();
+    let mut next_prune = Instant::now() + CANDIDATE_LIFETIME;
 
-    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+    while let Some(remaining) = window.next_wait() {
+        let now = Instant::now();
+        if matches!(&window, ScanWindow::Continuous(_)) && now >= next_prune {
+            candidates.retain(|_, candidate| {
+                now.duration_since(candidate.last_seen) < CANDIDATE_LIFETIME
+            });
+            next_prune = now + CANDIDATE_LIFETIME;
+        }
         match receiver.recv_timeout(remaining) {
             Ok(Event::Advertisement(advertisement)) => {
                 // Identification and connectability can be reported in separate packets.
@@ -130,6 +174,7 @@ fn wait_for_scales(
                         .entry(advertisement.address)
                         .or_insert_with(|| Candidate {
                             is_s200: false,
+                            last_seen: Instant::now(),
                             scale: Scale {
                                 address: advertisement.address,
                                 address_type: None,
@@ -140,12 +185,13 @@ fn wait_for_scales(
                                 setup_info: None,
                             },
                         });
+                candidate.last_seen = Instant::now();
                 if candidate.update(advertisement) && on_scale(&candidate.scale).is_break() {
                     break;
                 }
             }
             Ok(Event::Stopped(code)) => return Err(stopped_error(code)),
-            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(io::Error::other("lost the Windows scan event handler"));
             }
@@ -300,8 +346,24 @@ fn inspect_service_data(
 mod tests {
     use super::{
         Advertisement, BluetoothAddress, BluetoothAddressType, ControlFlow, Duration, Event,
-        SignalStrength, Weight, mpsc, wait_for_scales,
+        Instant, ScanWindow, SignalStrength, Weight, mpsc, wait_for_scales,
     };
+    use std::cell::Cell;
+
+    #[test]
+    fn continuous_scan_stays_active_through_idle_wait_and_honors_cancellation() {
+        let (_sender, receiver) = mpsc::channel();
+        let waits = Cell::new(0);
+        let keep_listening = || {
+            waits.set(waits.get() + 1);
+            waits.get() <= 2
+        };
+        wait_for_scales(ScanWindow::Continuous(&keep_listening), receiver, |_| {
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        assert_eq!(waits.get(), 3);
+    }
 
     #[test]
     fn reports_each_scale_and_combines_advertisements_by_address() {
@@ -330,19 +392,23 @@ mod tests {
         }
 
         let mut updates = Vec::new();
-        wait_for_scales(Duration::from_secs(1), receiver, |scale| {
-            updates.push((
-                scale.address(),
-                scale.is_connectable(),
-                scale.name().to_string(),
-                scale.weight(),
-            ));
-            if scale.address() == BluetoothAddress(56) {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        })
+        wait_for_scales(
+            ScanWindow::Timed(Instant::now() + Duration::from_secs(1)),
+            receiver,
+            |scale| {
+                updates.push((
+                    scale.address(),
+                    scale.is_connectable(),
+                    scale.name().to_string(),
+                    scale.weight(),
+                ));
+                if scale.address() == BluetoothAddress(56) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+        )
         .unwrap();
         assert_eq!(
             updates,

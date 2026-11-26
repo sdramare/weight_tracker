@@ -16,7 +16,7 @@ From the repository root, run this in PowerShell to open the desktop app.
 cargo run -p blt_unlock_gui
 ```
 
-The window scans for 30 seconds and shows each scale's name, Bluetooth address, signal strength, and whether it offers a connection. Step on the scale to wake it while the scan is running. Select **Scan again** to start a new scan.
+The desktop app keeps listening while it is open and lists the scales it discovers. Step on the S200 to start a reading. The app connects as soon as the registered scale advertises and resumes listening automatically when it sleeps.
 
 Run the CLI with the default discovery timeout or set a longer one.
 
@@ -36,7 +36,7 @@ cargo run -p blt_unlock_gui
 cargo run -- --weight
 ```
 
-Tap the scale to wake it. Once the app says it is connected, step on the scale and hold still. The app shows the live value and the settled reading in kilograms. It uses the Bluetooth login token saved in `target/s200-registration` during setup. [S200 Bluetooth protocol capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#data-channel)
+Step on the scale and hold still. The desktop app shows live weight in kilograms as it arrives and keeps the last settled reading visible between weigh-ins. The terminal reader exits after one settled reading. Both use the Bluetooth login token saved in `target/s200-registration` during setup. [S200 Bluetooth protocol capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#data-channel)
 
 For a scale that broadcasts authenticated MiBeacon weight, you can use its 32-digit bind key instead. [Home Assistant’s Xiaomi BLE guide](https://www.home-assistant.io/integrations/xiaomi_ble/#encryption)
 

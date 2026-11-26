@@ -27,6 +27,7 @@ pub use setup::{
     ConnectedWeightEvent, RegisteredScale, RegistrationEvent, RegistrationStep, ScaleSetupInfo,
     SetupCertificateReply, find_registration_scale, listen_for_connected_weight,
     probe_setup_service, register_scale_europe, send_setup_test_certificate,
+    watch_connected_weights,
 };
 pub use types::{
     BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight, WeightReading,
@@ -93,6 +94,17 @@ pub fn discover_scales_with_weight(
 ) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
     discovery::discover(duration, Some(WeightDecoder::new(key)), on_scale)
+}
+
+/// Watches for scales until stopped by the caller. An optional bind key enables
+/// authenticated MiBeacon weight readings.
+pub fn watch_scales(
+    key: Option<&ScaleBindKey>,
+    keep_listening: impl Fn() -> bool,
+    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+) -> io::Result<()> {
+    let _apartment = Apartment::initialize()?;
+    discovery::watch(key.map(WeightDecoder::new), keep_listening, on_scale)
 }
 
 /// Waits for the first recognized scale that advertises a connection.
