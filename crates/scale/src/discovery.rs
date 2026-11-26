@@ -13,7 +13,7 @@ use windows::Devices::Bluetooth::BluetoothAddressType;
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::DataReader;
 
-use super::{BluetoothAddress, Scale, SignalStrength, Weight, WeightDecoder};
+use super::{BluetoothAddress, Scale, ScaleSetupInfo, SignalStrength, Weight, WeightDecoder};
 
 struct Advertisement {
     address: BluetoothAddress,
@@ -23,6 +23,7 @@ struct Advertisement {
     connectable: bool,
     address_type: Option<BluetoothAddressType>,
     weight: Option<Weight>,
+    setup_info: Option<ScaleSetupInfo>,
 }
 
 struct Candidate {
@@ -136,6 +137,7 @@ fn wait_for_scales(
                                 signal_strength: advertisement.signal_strength,
                                 connectable: false,
                                 weight: None,
+                                setup_info: None,
                             },
                         });
                 if candidate.update(advertisement) && on_scale(&candidate.scale).is_break() {
@@ -159,6 +161,7 @@ impl Candidate {
         let address_type = advertisement.address_type.or(scale.address_type);
         let connectable = scale.connectable || advertisement.connectable;
         let weight = advertisement.weight.or(scale.weight);
+        let setup_info = advertisement.setup_info.or(scale.setup_info);
         let name_changed = advertisement
             .name
             .as_ref()
@@ -168,6 +171,7 @@ impl Candidate {
             || scale.signal_strength != advertisement.signal_strength
             || scale.connectable != connectable
             || scale.weight != weight
+            || scale.setup_info != setup_info
             || name_changed;
 
         self.is_s200 |= advertisement.is_s200;
@@ -175,6 +179,7 @@ impl Candidate {
         scale.signal_strength = advertisement.signal_strength;
         scale.connectable = connectable;
         scale.weight = weight;
+        scale.setup_info = setup_info;
         if name_changed {
             scale.name = advertisement.name;
         }
@@ -219,7 +224,7 @@ fn read_advertisement(
         normalized.starts_with("xiaomi scale s200")
             || normalized.starts_with("xiaomi smart scale s200")
     });
-    let (service_matches, weight) = payload
+    let (setup_info, weight) = payload
         .as_ref()
         .map(|payload| inspect_service_data(payload, address, decoder))
         .unwrap_or_default();
@@ -240,12 +245,13 @@ fn read_advertisement(
 
     Ok(Some(Advertisement {
         address,
-        is_s200: name_matches || service_matches,
+        is_s200: name_matches || setup_info.is_some(),
         name,
         signal_strength: SignalStrength(signal_dbm),
         connectable,
         address_type,
         weight,
+        setup_info,
     }))
 }
 
@@ -253,12 +259,12 @@ fn inspect_service_data(
     payload: &BluetoothLEAdvertisement,
     address: BluetoothAddress,
     decoder: Option<&WeightDecoder>,
-) -> (bool, Option<Weight>) {
+) -> (Option<ScaleSetupInfo>, Option<Weight>) {
     // AD type 0x16 carries 16-bit service data, including Xiaomi MiBeacon.
     let Ok(sections) = payload.GetSectionsByType(0x16) else {
-        return (false, None);
+        return (None, None);
     };
-    let mut detected = false;
+    let mut detected = None;
     for section in sections {
         let Ok(reader) = section
             .Data()
@@ -267,10 +273,13 @@ fn inspect_service_data(
             continue;
         };
         let mut header = [0; 6];
-        if reader.ReadBytes(&mut header).is_err() || !is_s200_service_data(&header) {
+        if reader.ReadBytes(&mut header).is_err() {
             continue;
         }
-        detected = true;
+        let Some(setup_info) = ScaleSetupInfo::from_mibeacon(&header) else {
+            continue;
+        };
+        detected = Some(setup_info);
         let Some(decoder) = decoder else { break };
         let Ok(length) = reader.UnconsumedBufferLength() else {
             continue;
@@ -281,34 +290,18 @@ fn inspect_service_data(
             continue;
         }
         if let Some(weight) = decoder.decode(address, &data) {
-            return (true, Some(weight));
+            return (Some(setup_info), Some(weight));
         }
     }
     (detected, None)
-}
-
-fn is_s200_service_data(data: &[u8]) -> bool {
-    // MiBeacon's service UUID (0xFE95) precedes the frame control and product ID.
-    matches!(data, [0x95, 0xfe, _, _, low, high, ..]
-        if matches!(u16::from_le_bytes([*low, *high]), 0x45c9 | 0x4c04 | 0x4dcb))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Advertisement, BluetoothAddress, BluetoothAddressType, ControlFlow, Duration, Event,
-        SignalStrength, Weight, is_s200_service_data, mpsc, wait_for_scales,
+        SignalStrength, Weight, mpsc, wait_for_scales,
     };
-
-    #[test]
-    fn recognizes_s200_mibeacon_headers() {
-        assert!(is_s200_service_data(&[0x95, 0xfe, 0x10, 0x5b, 0xcb, 0x4d]));
-        assert!(is_s200_service_data(&[0x95, 0xfe, 0x10, 0x59, 0x04, 0x4c]));
-        assert!(is_s200_service_data(&[0x95, 0xfe, 0x10, 0x5b, 0xc9, 0x45]));
-        assert!(!is_s200_service_data(&[0x95, 0xfe, 0x10, 0x5b, 0xd5, 0x3b]));
-        assert!(!is_s200_service_data(&[0x95, 0xfe, 0x10, 0x5b, 0xcb]));
-        assert!(!is_s200_service_data(&[0x16, 0x18, 0x10, 0x5b, 0xcb, 0x4d]));
-    }
 
     #[test]
     fn reports_each_scale_and_combines_advertisements_by_address() {
@@ -331,6 +324,7 @@ mod tests {
                     connectable,
                     address_type,
                     weight,
+                    setup_info: None,
                 }))
                 .unwrap();
         }

@@ -47,6 +47,16 @@ With the same environment variable set, the CLI prints the first authenticated r
 cargo run -- --weight --seconds 45
 ```
 
+## Inspect scale setup
+
+```powershell
+cargo run -- --setup-info --seconds 30
+```
+
+Step on the scale during the scan. This read-only command reports the advertised product ID and MiBeacon version without a bind key. For MiBeacon v5 it also reports the authentication mode, registration status, and whether the scale is requesting setup.
+
+A capture of first-time registration on the S200 `ms113` shows a key exchange and a Xiaomi Cloud certificate. The capture documents this firmware variant and provides a starting point for a Rust setup flow. [S200 registration capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#registration-for-completeness-not-needed-in-practice)
+
 ## Build and test
 
 ```powershell

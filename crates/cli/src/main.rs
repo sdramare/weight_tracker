@@ -1,14 +1,16 @@
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: blt_unlock [--scale | --weight] [--seconds <1-60>]\n\
+const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info] [--seconds <1-60>]\n\
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
     Use --weight with S200_BINDKEY set to wait for a stabilized weight.\n\
+    Use --setup-info to inspect the setup information in S200 broadcasts.\n\
     The discovery timeout defaults to 30 seconds.";
 const DEFAULT_SECONDS: u64 = 30;
 
 enum Command {
     Services,
     Weight,
+    SetupInfo,
 }
 
 fn main() -> ExitCode {
@@ -38,6 +40,7 @@ fn main() -> ExitCode {
             }
             Some("--scale") if command.is_none() => command = Some(Command::Services),
             Some("--weight") if command.is_none() => command = Some(Command::Weight),
+            Some("--setup-info") if command.is_none() => command = Some(Command::SetupInfo),
             _ => return usage_error(),
         }
     }
@@ -66,6 +69,10 @@ fn run(seconds: u64, command: Command) -> ExitCode {
             (show_connection(duration), "Scale connection failed")
         }
         Command::Weight => (show_weight(duration), "Scale weight unavailable"),
+        Command::SetupInfo => (
+            show_setup_info(duration),
+            "Scale setup information unavailable",
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -124,6 +131,36 @@ fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
         )
     })?;
     println!("{address}  {weight}");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn show_setup_info(duration: std::time::Duration) -> std::io::Result<()> {
+    use std::collections::BTreeMap;
+    use std::io;
+    use std::ops::ControlFlow;
+
+    println!(
+        "Listening for S200 setup information for up to {} seconds. Step on the scale to wake it.",
+        duration.as_secs()
+    );
+    let mut reports = BTreeMap::new();
+    xiaomi_s200::discover_scales(duration, |scale| {
+        let Some(info) = scale.setup_info() else {
+            return ControlFlow::Continue(());
+        };
+        let address = scale.address();
+        if reports.insert(address, info) != Some(info) {
+            println!("{address}  {info}");
+        }
+        ControlFlow::Continue(())
+    })?;
+    if reports.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No S200 MiBeacon setup information arrived.",
+        ));
+    }
     Ok(())
 }
 

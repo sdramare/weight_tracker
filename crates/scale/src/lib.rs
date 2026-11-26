@@ -3,6 +3,7 @@
 #![cfg(windows)]
 
 mod discovery;
+mod setup;
 mod types;
 mod weight;
 
@@ -16,6 +17,7 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatu
 use windows::Devices::Bluetooth::{BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
+pub use setup::ScaleSetupInfo;
 pub use types::{BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight};
 pub use weight::ScaleBindKey;
 use weight::WeightDecoder;
@@ -30,6 +32,7 @@ pub struct Scale {
     signal_strength: SignalStrength,
     connectable: bool,
     weight: Option<Weight>,
+    setup_info: Option<ScaleSetupInfo>,
 }
 
 impl Scale {
@@ -52,6 +55,11 @@ impl Scale {
     /// The latest stabilized weight received for this scale during the scan.
     pub fn weight(&self) -> Option<Weight> {
         self.weight
+    }
+
+    /// The most recent setup information advertised by the scale.
+    pub fn setup_info(&self) -> Option<ScaleSetupInfo> {
+        self.setup_info
     }
 }
 
