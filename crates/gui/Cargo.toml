@@ -1,0 +1,11 @@
+[package]
+name = "blt_unlock_gui"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow"] }
+xiaomi-s200 = { path = "../scale" }
+
+[lints]
+workspace = true

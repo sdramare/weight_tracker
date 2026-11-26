@@ -1,8 +1,5 @@
 use std::process::ExitCode;
 
-#[cfg(windows)]
-mod scale;
-
 const USAGE: &str = "Usage: blt_unlock [--scale] [--seconds <1-60>]\n\
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
     The discovery timeout defaults to 30 seconds.";
@@ -48,12 +45,36 @@ fn usage_error() -> ExitCode {
 
 #[cfg(windows)]
 fn run(seconds: u64) -> ExitCode {
-    let duration = std::time::Duration::from_secs(seconds);
-    if scale::run(duration) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    use std::time::Duration;
+
+    println!(
+        "Looking for a Xiaomi Smart Scale S200 for up to {seconds} seconds. Step on the scale to wake it."
+    );
+    match show_connection(Duration::from_secs(seconds)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Scale connection failed: {error}");
+            ExitCode::FAILURE
+        }
     }
+}
+
+#[cfg(windows)]
+fn show_connection(duration: std::time::Duration) -> std::io::Result<()> {
+    let scale = xiaomi_s200::find_connectable_scale(duration)?;
+    println!(
+        "Found a Xiaomi Smart Scale S200 at {}. Requesting its GATT services...",
+        scale.formatted_address(),
+    );
+    let services = xiaomi_s200::read_services(&scale)?;
+    println!(
+        "Connected. The scale returned {} GATT services.",
+        services.len()
+    );
+    for service in services {
+        println!("  {service}");
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]

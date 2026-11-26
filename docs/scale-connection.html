@@ -35,6 +35,7 @@
       background: var(--soft);
       border-radius: .75rem;
     }
+    .quick-start + .quick-start { margin-top: .5rem; }
     code { font: .9em/1.4 ui-monospace, Consolas, monospace; color: var(--ink); }
     .command { padding: .4rem .65rem; color: #fff; background: var(--ink); border-radius: .4rem; }
     .panel {
@@ -78,15 +79,20 @@
   <main>
     <header>
       <h1>How the Xiaomi S200 connects</h1>
-      <p class="intro">The Rust app finds the scale over Bluetooth Low Energy and lists its GATT services.</p>
+      <p class="intro">The desktop and terminal apps share a Rust library for finding the S200 over Bluetooth Low Energy.</p>
+      <div class="quick-start">
+        <code class="command">cargo run -p blt_unlock_gui</code>
+        <p>Open the desktop app and see scales as they appear.</p>
+      </div>
       <div class="quick-start">
         <code class="command">cargo run</code>
-        <p>Run from the project folder in Windows Terminal, then step on the scale to wake it.</p>
+        <p>Connect to the first available scale and list its GATT services.</p>
       </div>
+      <p class="intro">Run either command from the project folder, then step on the scale to wake it.</p>
     </header>
 
     <section class="panel" aria-labelledby="sequence-heading">
-      <h2 id="sequence-heading">From wake-up to connection</h2>
+      <h2 id="sequence-heading">How the terminal app connects</h2>
       <figure>
         <div class="diagram" role="region" aria-label="Scrollable connection diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 392" role="img" aria-labelledby="sequence-title sequence-description">
@@ -103,7 +109,7 @@
             <rect class="node" x="52" y="14" width="180" height="42" rx="8"/>
             <rect class="node" x="330" y="14" width="180" height="42" rx="8"/>
             <rect class="node" x="608" y="14" width="180" height="42" rx="8"/>
-            <text class="node-title" x="142" y="41">Rust app</text>
+            <text class="node-title" x="142" y="41">Terminal app</text>
             <text class="node-title" x="420" y="41">Windows Bluetooth</text>
             <text class="node-title" x="698" y="41">Xiaomi S200</text>
             <path class="lifeline" d="M142 56V382 M420 56V382 M698 56V382"/>
@@ -132,9 +138,9 @@
       <h2 id="match-heading">How the app recognizes the scale</h2>
       <figure>
         <div class="diagram" role="region" aria-label="Scrollable scale recognition diagram" tabindex="0">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 192" role="img" aria-labelledby="match-title match-description">
-            <title id="match-title">S200 recognition and connection rule</title>
-            <desc id="match-description">The app recognizes the S200 by its Bluetooth name or the S200 product ID in Xiaomi MiBeacon service data. It attempts a connection once a connectable advertisement has also been seen from the same Bluetooth address. These signals can arrive in separate packets.</desc>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 246" role="img" aria-labelledby="match-title match-description">
+            <title id="match-title">S200 recognition for the desktop and terminal apps</title>
+            <desc id="match-description">The shared library recognizes the S200 by its Bluetooth name or the S200 product ID in Xiaomi MiBeacon service data. The desktop app lists every recognized address. The terminal app waits for a connectable advertisement from the same address and then connects. Identification and connectability can arrive in separate packets.</desc>
             <defs>
               <marker id="match-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
@@ -152,6 +158,7 @@
             <circle class="node" cx="297" cy="97" r="18"/>
             <text class="node-title" x="297" y="102">or</text>
             <path class="arrow" d="M315 97H353" marker-end="url(#match-arrow)"/>
+            <path class="arrow" d="M331 97V193H353" marker-end="url(#match-arrow)"/>
 
             <rect class="node" x="358" y="65" width="220" height="64" rx="8"/>
             <text class="node-title" x="468" y="92">Same Bluetooth address</text>
@@ -161,9 +168,13 @@
             <rect class="node-accent" x="625" y="65" width="195" height="64" rx="8"/>
             <text class="node-title node-inverse" x="722.5" y="92">Connect to the S200</text>
             <text class="node-detail node-inverse" x="722.5" y="112">Uncached GATT discovery</text>
+
+            <rect class="node" x="358" y="161" width="462" height="64" rx="8"/>
+            <text class="node-title" x="589" y="188">Show the scale in the desktop app</text>
+            <text class="node-detail" x="589" y="208">Name, Bluetooth address, signal strength, and connectability</text>
           </svg>
         </div>
-        <figcaption>The app listens for up to 30 seconds by default. Use <code>cargo run -- --seconds 45</code> to give the scale more time to appear.</figcaption>
+        <figcaption>The desktop app scans for 30 seconds each time. The terminal app also defaults to 30 seconds, which you can change with <code>cargo run -- --seconds 45</code>.</figcaption>
       </figure>
     </section>
 
@@ -178,9 +189,10 @@
 
     <footer>
       Source code
-      <a href="../src/main.rs">Command line</a>
-      <a href="../src/scale/discovery.rs">Scale discovery</a>
-      <a href="../src/scale.rs">GATT connection</a>
+      <a href="../crates/cli/src/main.rs">Command line</a>
+      <a href="../crates/gui/src/desktop.rs">Desktop app</a>
+      <a href="../crates/scale/src/discovery.rs">Scale discovery</a>
+      <a href="../crates/scale/src/lib.rs">GATT connection</a>
     </footer>
   </main>
 </body>

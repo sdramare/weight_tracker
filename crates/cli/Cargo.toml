@@ -1,0 +1,10 @@
+[package]
+name = "blt_unlock"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+xiaomi-s200 = { path = "../scale" }
+
+[lints]
+workspace = true

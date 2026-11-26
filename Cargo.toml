@@ -1,17 +1,12 @@
-[package]
-name = "blt_unlock"
+[workspace]
+members = ["crates/cli", "crates/gui", "crates/scale"]
+default-members = ["crates/cli"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[lints.clippy]
+[workspace.lints.clippy]
 panic = "forbid"
 unwrap_used = "forbid"
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = [
-    "Devices_Bluetooth_Advertisement",
-    "Devices_Bluetooth_GenericAttributeProfile",
-    "Foundation_Collections",
-    "Storage_Streams",
-    "Win32_System_WinRT",
-] }

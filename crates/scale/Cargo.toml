@@ -1,0 +1,16 @@
+[package]
+name = "xiaomi-s200"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+] }
+
+[lints]
+workspace = true

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::ops::ControlFlow;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -12,18 +13,20 @@ use windows::Devices::Bluetooth::BluetoothAddressType;
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::DataReader;
 
+use super::Scale;
+
 struct Advertisement {
     address: u64,
     is_s200: bool,
+    name: Option<String>,
+    signal_dbm: i16,
     connectable: bool,
     address_type: Option<BluetoothAddressType>,
 }
 
-#[derive(Default)]
 struct Candidate {
     is_s200: bool,
-    connectable: bool,
-    address_type: Option<BluetoothAddressType>,
+    scale: Scale,
 }
 
 enum Event {
@@ -94,20 +97,21 @@ impl Drop for Watcher {
     }
 }
 
-pub(super) fn find_scale(duration: Duration) -> io::Result<(u64, Option<BluetoothAddressType>)> {
+pub(super) fn discover(
+    duration: Duration,
+    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+) -> io::Result<()> {
     let (sender, receiver) = mpsc::channel();
     let watcher = Watcher::start(sender)?;
-    let result = wait_for_scale(duration, receiver);
-    let stopped = watcher.stop();
-    let target = result?;
-    stopped?;
-    Ok(target)
+    let result = wait_for_scales(duration, receiver, on_scale);
+    result.and(watcher.stop())
 }
 
-fn wait_for_scale(
+fn wait_for_scales(
     duration: Duration,
     receiver: Receiver<Event>,
-) -> io::Result<(u64, Option<BluetoothAddressType>)> {
+    mut on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+) -> io::Result<()> {
     let deadline = Instant::now() + duration;
     let mut candidates = HashMap::<u64, Candidate>::new();
 
@@ -115,12 +119,21 @@ fn wait_for_scale(
         match receiver.recv_timeout(remaining) {
             Ok(Event::Advertisement(advertisement)) => {
                 // Identification and connectability can be reported in separate packets.
-                let candidate = candidates.entry(advertisement.address).or_default();
-                candidate.is_s200 |= advertisement.is_s200;
-                candidate.connectable |= advertisement.connectable;
-                candidate.address_type = advertisement.address_type.or(candidate.address_type);
-                if candidate.is_s200 && candidate.connectable {
-                    return Ok((advertisement.address, candidate.address_type));
+                let candidate =
+                    candidates
+                        .entry(advertisement.address)
+                        .or_insert_with(|| Candidate {
+                            is_s200: false,
+                            scale: Scale {
+                                address: advertisement.address,
+                                address_type: None,
+                                name: None,
+                                signal_dbm: advertisement.signal_dbm,
+                                connectable: false,
+                            },
+                        });
+                if candidate.update(advertisement) && on_scale(&candidate.scale).is_break() {
+                    break;
                 }
             }
             Ok(Event::Stopped(code)) => return Err(stopped_error(code)),
@@ -131,12 +144,33 @@ fn wait_for_scale(
         }
     }
 
-    let message = if candidates.values().any(|candidate| candidate.is_s200) {
-        "the S200 was detected, but did not offer a connection. Close Xiaomi Home and wake the scale again"
-    } else {
-        "no Xiaomi Smart Scale S200 was detected. Keep it near the PC and wake it during the scan"
-    };
-    Err(io::Error::new(io::ErrorKind::NotFound, message))
+    Ok(())
+}
+
+impl Candidate {
+    fn update(&mut self, advertisement: Advertisement) -> bool {
+        let scale = &mut self.scale;
+        let address_type = advertisement.address_type.or(scale.address_type);
+        let connectable = scale.connectable || advertisement.connectable;
+        let name_changed = advertisement
+            .name
+            .as_ref()
+            .is_some_and(|name| scale.name.as_ref() != Some(name));
+        let changed = !self.is_s200
+            || scale.address_type != address_type
+            || scale.signal_dbm != advertisement.signal_dbm
+            || scale.connectable != connectable
+            || name_changed;
+
+        self.is_s200 |= advertisement.is_s200;
+        scale.address_type = address_type;
+        scale.signal_dbm = advertisement.signal_dbm;
+        scale.connectable = connectable;
+        if name_changed {
+            scale.name = advertisement.name;
+        }
+        self.is_s200 && changed
+    }
 }
 
 fn stopped_error(code: i32) -> io::Error {
@@ -157,8 +191,9 @@ fn read_advertisement(
     args: &BluetoothLEAdvertisementReceivedEventArgs,
 ) -> windows::core::Result<Option<Advertisement>> {
     let address = args.BluetoothAddress()?;
+    let signal_dbm = args.RawSignalStrengthInDBm()?;
     // Skip anonymous advertisements and out-of-range notices containing stale data.
-    if address == 0 || args.RawSignalStrengthInDBm()? == -127 {
+    if address == 0 || signal_dbm == -127 {
         return Ok(None);
     }
 
@@ -166,11 +201,13 @@ fn read_advertisement(
     let name = payload
         .as_ref()
         .and_then(|payload| payload.LocalName().ok())
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    let is_s200 = name.starts_with("xiaomi scale s200")
-        || name.starts_with("xiaomi smart scale s200")
-        || payload.as_ref().is_some_and(is_s200_payload);
+        .map(|name| name.to_string_lossy())
+        .filter(|name| !name.trim().is_empty());
+    let is_s200 = name.as_ref().is_some_and(|name| {
+        let normalized = name.to_ascii_lowercase();
+        normalized.starts_with("xiaomi scale s200")
+            || normalized.starts_with("xiaomi smart scale s200")
+    }) || payload.as_ref().is_some_and(is_s200_payload);
     let connectable = match args.AdvertisementType() {
         Ok(
             BluetoothLEAdvertisementType::ConnectableUndirected
@@ -189,6 +226,8 @@ fn read_advertisement(
     Ok(Some(Advertisement {
         address,
         is_s200,
+        name,
+        signal_dbm,
         connectable,
         address_type,
     }))
@@ -221,8 +260,8 @@ fn is_s200_service_data(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Advertisement, BluetoothAddressType, Duration, Event, is_s200_service_data, mpsc,
-        wait_for_scale,
+        Advertisement, BluetoothAddressType, ControlFlow, Duration, Event, is_s200_service_data,
+        mpsc, wait_for_scales,
     };
 
     #[test]
@@ -236,23 +275,49 @@ mod tests {
     }
 
     #[test]
-    fn combines_scale_advertisements_from_the_same_address() {
+    fn reports_each_scale_and_combines_advertisements_by_address() {
         let (sender, receiver) = mpsc::channel();
         let address_type = Some(BluetoothAddressType::Public);
-        for (address, is_s200, connectable) in
-            [(12, true, false), (34, false, true), (12, false, true)]
-        {
+        for (address, is_s200, connectable) in [
+            (12, true, false),
+            (34, false, true),
+            (12, false, true),
+            (12, false, true),
+            (56, true, false),
+        ] {
             sender
                 .send(Event::Advertisement(Advertisement {
                     address,
                     is_s200,
+                    name: is_s200.then(|| format!("Xiaomi Scale S200 {address}")),
+                    signal_dbm: -60,
                     connectable,
                     address_type,
                 }))
                 .unwrap();
         }
 
-        let found = wait_for_scale(Duration::from_secs(1), receiver).unwrap();
-        assert_eq!(found, (12, address_type));
+        let mut updates = Vec::new();
+        wait_for_scales(Duration::from_secs(1), receiver, |scale| {
+            updates.push((
+                scale.address(),
+                scale.is_connectable(),
+                scale.name().to_owned(),
+            ));
+            if scale.address() == 56 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            updates,
+            [
+                (12, false, "Xiaomi Scale S200 12".to_owned()),
+                (12, true, "Xiaomi Scale S200 12".to_owned()),
+                (56, false, "Xiaomi Scale S200 56".to_owned()),
+            ]
+        );
     }
 }

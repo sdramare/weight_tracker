@@ -2,7 +2,7 @@
 setlocal
 pushd "%~dp0" || exit /b 1
 
-cargo clippy --locked --all-targets && cargo build --locked
+cargo clippy --locked --workspace --all-targets && cargo build --locked --workspace
 set "build_status=%errorlevel%"
 
 popd
