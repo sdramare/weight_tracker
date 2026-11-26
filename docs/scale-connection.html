@@ -374,6 +374,7 @@
       <h3>Group the chart and calculate the forecast</h3>
       <ol class="steps">
         <li>Convert timestamps to local dates. Group them by date, by the Monday of that week, or by the first day of that month. Plot the mean weight of each bucket at its latest observed date.</li>
+        <li>Place horizontal-axis ticks on whole calendar dates in every grouping. Space them further apart as the visible range grows, and include the year when it spans at least 365 days. An unzoomed chart with a single point and no forecast shows one date.</li>
         <li>Use the latest three to 30 raw records for the forecast. For each timestamp, calculate elapsed days <code>t</code> since the first selected record. Let <code>w</code> be weight in kilograms.</li>
         <li>Draw a dashed line from the latest plotted point to 30 days after it, using the endpoint below. Display the line only if the endpoint weight is finite and positive.</li>
       </ol>

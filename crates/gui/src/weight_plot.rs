@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
 use eframe::egui::{self, Color32};
-use egui_plot::{Legend, Line, LineStyle, Plot, PlotPoints, Points};
+use egui_plot::{GridInput, GridMark, Legend, Line, LineStyle, Plot, PlotPoints, Points};
 
 use super::history::WeightEntry;
 
@@ -67,15 +67,14 @@ pub(super) fn show(ui: &mut egui::Ui, entries: &[WeightEntry], grouping: &mut Gr
         .height(ui.available_height().max(180.0) - 24.0)
         .legend(Legend::default())
         .y_axis_label("kg")
-        .x_axis_formatter(move |tick, _| {
-            date_label(
-                tick.value,
-                if grouping == GroupBy::Month {
-                    "%b %Y"
-                } else {
-                    "%d %b"
-                },
-            )
+        .x_grid_spacer(calendar_grid)
+        .x_axis_formatter(|tick, visible_days| {
+            let format = if visible_days.end() - visible_days.start() >= 365.0 {
+                "%d %b %Y"
+            } else {
+                "%d %b"
+            };
+            date_label(tick.value, format)
         })
         .label_formatter(|name, point| {
             format!(
@@ -177,6 +176,25 @@ fn kilograms(entry: &WeightEntry) -> f64 {
     f64::from(entry.weight.hundredths_of_kg()) / 100.0
 }
 
+fn calendar_grid(input: GridInput) -> Vec<GridMark> {
+    // Reserve about 96 screen points per date label using egui_plot's default 8-point grid unit.
+    let step_days = (input.base_step_size * 12.0).ceil().max(1.0);
+    if !step_days.is_finite() {
+        return Vec::new();
+    }
+    let (min, max) = input.bounds;
+    let min = min.max(f64::from(NaiveDate::MIN.num_days_from_ce()));
+    let max = max.min(f64::from(NaiveDate::MAX.num_days_from_ce()));
+    let first = (min / step_days).ceil() as i64;
+    let last = (max / step_days).floor() as i64;
+    (first..=last)
+        .map(|index| GridMark {
+            value: index as f64 * step_days,
+            step_size: step_days,
+        })
+        .collect()
+}
+
 fn date_label(value: f64, format: &str) -> String {
     NaiveDate::from_num_days_from_ce_opt(value.round() as i32)
         .map_or_else(String::new, |date| date.format(format).to_string())
@@ -185,9 +203,68 @@ fn date_label(value: f64, format: &str) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::{Local, TimeZone};
+    use eframe::egui::{self, Shape};
+    use egui_plot::{GridInput, GridMark};
     use xiaomi_s200::Weight;
 
-    use super::{GroupBy, WeightEntry, grouped_points, projected_line};
+    use super::{GroupBy, WeightEntry, calendar_grid, grouped_points, projected_line, show};
+
+    #[test]
+    fn paints_one_date_label_for_one_weigh_in_in_every_group() {
+        let entry = WeightEntry {
+            measured_at_ms: Local
+                .with_ymd_and_hms(2026, 11, 26, 12, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis(),
+            weight: Weight::from_hundredths_of_kg(8440),
+        };
+        for mut grouping in [GroupBy::Day, GroupBy::Week, GroupBy::Month] {
+            let context = egui::Context::default();
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(780.0, 640.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        show(ui, &[entry], &mut grouping);
+                    });
+                },
+            );
+            let labels = output.shapes.iter().filter(
+                |shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "26 Nov"),
+            );
+            assert_eq!(labels.count(), 1, "{grouping:?}");
+        }
+    }
+
+    #[test]
+    fn dates_stay_on_whole_days_at_different_zoom_levels() {
+        let zoomed_in = calendar_grid(GridInput {
+            bounds: (100.8, 101.2),
+            base_step_size: 0.01,
+        });
+        assert_eq!(
+            zoomed_in,
+            [GridMark {
+                value: 101.0,
+                step_size: 1.0,
+            }]
+        );
+
+        let zoomed_out = calendar_grid(GridInput {
+            bounds: (100.8, 200.2),
+            base_step_size: 1.68,
+        });
+        assert_eq!(
+            zoomed_out.iter().map(|mark| mark.value).collect::<Vec<_>>(),
+            [105.0, 126.0, 147.0, 168.0, 189.0]
+        );
+    }
 
     #[test]
     fn groups_by_calendar_period_and_forecasts_past_the_last_point() {
