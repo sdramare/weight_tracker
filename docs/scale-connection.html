@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>How the Xiaomi S200 connects</title>
+  <title>Xiaomi S200 connection and weight flows</title>
   <style>
     :root {
       color-scheme: light;
@@ -20,9 +20,10 @@
     * { box-sizing: border-box; }
     body { margin: 0; color: var(--ink); background: var(--page); }
     main { max-width: 64rem; margin: auto; padding: 2.75rem 1.25rem 2rem; }
-    h1, h2, p, figure { margin: 0; }
+    h1, h2, h3, p, figure { margin: 0; }
     h1 { font-size: clamp(2.15rem, 5vw, 3.5rem); letter-spacing: -.045em; line-height: 1.07; }
-    h2 { font-size: 1.3rem; letter-spacing: -.02em; }
+    h2 { font-size: 1.5rem; letter-spacing: -.025em; }
+    h3 { margin-block: 1.15rem .35rem; font-size: 1.05rem; }
     p, figcaption { color: var(--muted); }
     a { color: var(--accent); text-underline-offset: .18em; }
     .intro { margin-block: .6rem 1.25rem; }
@@ -36,7 +37,7 @@
       border-radius: .75rem;
     }
     .quick-start + .quick-start { margin-top: .5rem; }
-    code { font: .9em/1.4 ui-monospace, Consolas, monospace; color: var(--ink); }
+    code { font: .9em/1.4 ui-monospace, Consolas, monospace; color: var(--ink); overflow-wrap: anywhere; }
     .command { padding: .4rem .65rem; color: #fff; background: var(--ink); border-radius: .4rem; }
     .panel {
       margin-top: 1rem;
@@ -58,6 +59,23 @@
     .arrow { fill: none; stroke: var(--accent); stroke-width: 1.8; }
     .broadcast { stroke: var(--broadcast); }
     .message { text-anchor: middle; font-size: 15px; font-weight: 600; }
+    .toc { display: flex; flex-wrap: wrap; gap: .35rem 1.15rem; padding: 0; margin: 0; list-style: none; }
+    .steps { padding-inline-start: 1.45rem; margin-block: .65rem 0; }
+    .steps li + li { margin-top: .45rem; }
+    .steps li::marker { color: var(--accent); font-weight: 650; }
+    .fields { margin-block: .75rem; overflow-x: auto; }
+    .fields:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: .92rem; }
+    caption { padding-bottom: .35rem; text-align: left; font-weight: 650; }
+    th, td { padding: .52rem .65rem; vertical-align: top; border-bottom: 1px solid var(--line); }
+    thead th { background: var(--soft); }
+    tbody th { font-weight: 600; }
+    .note, .source { margin-top: .75rem; font-size: .9rem; }
+    .note { padding: .65rem .85rem; border-inline-start: 3px solid var(--accent); background: var(--soft); }
+    .panel > h2 + p { margin-top: .25rem; }
+    .panel > h2 + .quick-start { margin-top: .6rem; }
+    .formula { margin-block: .6rem; padding: .6rem .85rem; background: var(--soft); border-radius: .4rem; }
+    .formula code { display: block; }
     .quick-start p, figcaption, .help p, footer { font-size: .9rem; }
     .help { display: grid; grid-template-columns: repeat(3, 1fr); gap: .8rem 1.25rem; margin-top: .6rem; }
     .help strong { display: block; margin-bottom: .1rem; color: var(--ink); }
@@ -70,7 +88,7 @@
     @media print {
       body { background: #fff; }
       main { padding: 0; }
-      .panel, figure { break-inside: avoid; }
+      figure, tr { break-inside: avoid; }
       svg { min-width: 0; }
     }
   </style>
@@ -78,8 +96,8 @@
 <body>
   <main>
     <header>
-      <h1>How the Xiaomi S200 connects</h1>
-      <p class="intro">The desktop and terminal apps share a Rust library for finding the S200 over Bluetooth Low Energy.</p>
+      <h1>Xiaomi S200 connection and weight flows</h1>
+      <p class="intro">Follow the Rust implementation from the first Bluetooth advertisement to registration, authenticated weight, and the desktop history chart.</p>
       <div class="quick-start">
         <code class="command">cargo run -p blt_unlock_gui</code>
         <p>Open the desktop app and keep listening for scales and weigh-ins.</p>
@@ -89,6 +107,20 @@
         <p>Connect to the first available scale and list its GATT services.</p>
       </div>
       <p class="intro">Run either command from the project folder, then step on the scale to wake it.</p>
+      <nav aria-label="On this page">
+        <ul class="toc">
+          <li><a href="#sequence-heading">GATT connection</a></li>
+          <li><a href="#match-heading">Discovery</a></li>
+          <li><a href="#weight-heading">Connected weight</a></li>
+          <li><a href="#broadcast-heading">Broadcast weight</a></li>
+          <li><a href="#history-heading">Desktop and history</a></li>
+          <li><a href="#registration-heading">Registration</a></li>
+          <li><a href="#transport-heading">Packet framing</a></li>
+          <li><a href="#cloud-heading">Xiaomi cloud session</a></li>
+          <li><a href="#setup-heading">Diagnostics</a></li>
+          <li><a href="#help-heading">Troubleshooting</a></li>
+        </ul>
+      </nav>
     </header>
 
     <section class="panel" aria-labelledby="sequence-heading">
@@ -130,8 +162,14 @@
             <path class="arrow" d="M420 369H146" marker-end="url(#request-arrow)"/>
           </svg>
         </div>
-        <figcaption>The terminal prints the scale’s address and the services it returned, such as <code>FE95</code>.</figcaption>
+        <figcaption>The terminal prints the scale’s address and the services it returned, such as <code>0000FE95-0000-1000-8000-00805F9B34FB</code>.</figcaption>
       </figure>
+      <ol class="steps">
+        <li><strong>Select a scale.</strong> The default command and <code>--scale</code> stop scanning on the first recognized S200 with a connectable advertisement. The default discovery time is 30 seconds. <code>--seconds N</code> accepts 1–60.</li>
+        <li><strong>Open it by Bluetooth address.</strong> The shared library passes the public or random address type to WinRT when known and uses the address alone otherwise.</li>
+        <li><strong>Request an uncached service list.</strong> <code>GetGattServicesWithCacheModeAsync(Uncached)</code> contacts the device. The terminal checks the GATT status and prints the address and returned UUIDs after success.</li>
+      </ol>
+      <p class="source"><a href="../crates/cli/src/main.rs">Terminal commands</a> · <a href="../crates/scale/src/lib.rs">Windows Bluetooth connection</a></p>
     </section>
 
     <section class="panel" aria-labelledby="match-heading">
@@ -166,7 +204,7 @@
             <path class="arrow" d="M578 97H620" marker-end="url(#match-arrow)"/>
 
             <rect class="node-accent" x="625" y="65" width="195" height="64" rx="8"/>
-            <text class="node-title node-inverse" x="722.5" y="92">Connect to the S200</text>
+            <text class="node-title node-inverse" x="722.5" y="92">List GATT services</text>
             <text class="node-detail node-inverse" x="722.5" y="112">Uncached GATT discovery</text>
 
             <rect class="node" x="358" y="161" width="462" height="64" rx="8"/>
@@ -174,12 +212,31 @@
             <text class="node-detail" x="589" y="208">Name, Bluetooth address, signal strength, and connectability</text>
           </svg>
         </div>
-        <figcaption>Minimize the desktop window to keep monitoring in the system tray. Double-click the tray icon to restore the window, or right-click it for <strong>Show weight window</strong> and <strong>Quit</strong>. Closing the window also stops monitoring. The terminal scan defaults to 30 seconds.</figcaption>
+        <figcaption>Windows can deliver identification and connectability in separate packets. The app combines them when both use the same Bluetooth address.</figcaption>
       </figure>
+      <ol class="steps">
+        <li><strong>Start an active WinRT advertisement watcher.</strong> When a broadcast bind key is available, the watcher also requests extended advertisements. Discard address zero and the stale or out-of-range RSSI value <code>−127</code>.</li>
+        <li><strong>Recognize an S200.</strong> Match a case-insensitive name prefix from the diagram or inspect 16-bit service data in AD type <code>0x16</code>. The first six data bytes are <code>95 fe | control LE16 | product LE16</code>. Accepted product IDs are <code>0x45C9</code>, <code>0x4C04</code>, and <code>0x4DCB</code>.</li>
+        <li><strong>Determine connectability.</strong> Directed and undirected connectable advertisements qualify. An extended advertisement qualifies when Windows sets <code>IsConnectable</code>.</li>
+        <li><strong>Merge by address.</strong> Keep the most recent signal and any new name, address type, setup info, or decoded weight. Recognition and connectability stay set for the lifetime of the candidate. Emit recognized candidates when those fields change. In continuous mode, also emit each freshly decoded weight and prune stale candidates every 30 seconds.</li>
+      </ol>
+      <div class="fields" role="region" aria-label="MiBeacon setup flags" tabindex="0">
+        <table>
+          <caption>Setup fields in the MiBeacon control word</caption>
+          <thead><tr><th scope="col">Bits</th><th scope="col">Interpretation</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">15–12</th><td>MiBeacon version. The three setup fields below are decoded for v5.</td></tr>
+            <tr><th scope="row">11–10</th><td><code>0</code> legacy, <code>1</code> secure, <code>2</code> Standard Auth, <code>3</code> reserved.</td></tr>
+            <tr><th scope="row">9</th><td>Set when the device is soliciting setup.</td></tr>
+            <tr><th scope="row">8</th><td>Set when the device is registered.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="source"><a href="../crates/scale/src/discovery.rs">Advertisement watcher</a> · <a href="../crates/scale/src/setup.rs">Setup flag decoding</a></p>
     </section>
 
     <section class="panel" aria-labelledby="weight-heading">
-      <h2 id="weight-heading">How a weight reaches the app</h2>
+      <h2 id="weight-heading">Read connected weight on an S200 ms113</h2>
       <figure>
         <div class="diagram" role="region" aria-label="Scrollable weight reading diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="weight-title weight-description">
@@ -195,20 +252,85 @@
             <text class="node-detail" x="130" y="69">The app is already listening</text>
             <path class="arrow" d="M240 54H299" marker-end="url(#weight-arrow)"/>
             <rect class="node" x="304" y="22" width="232" height="64" rx="8"/>
-            <text class="node-title" x="420" y="49">Connect over Bluetooth</text>
-            <text class="node-detail" x="420" y="69">Use the saved login token</text>
+            <text class="node-title" x="420" y="49">Authenticate over GATT</text>
+            <text class="node-detail" x="420" y="69">Token, challenges, and HMACs</text>
             <path class="arrow" d="M536 54H595" marker-end="url(#weight-arrow)"/>
             <rect class="node-accent" x="600" y="22" width="220" height="64" rx="8"/>
-            <text class="node-title node-inverse" x="710" y="49">Display the weight</text>
-            <text class="node-detail node-inverse" x="710" y="69">Live and settled kilograms</text>
+            <text class="node-title node-inverse" x="710" y="49">Decode and display</text>
+            <text class="node-detail node-inverse" x="710" y="69">AES-CCM on FE95/001B</text>
           </svg>
         </div>
-        <figcaption>The desktop app keeps the last settled reading visible and resumes listening when the scale sleeps. Use <code>cargo run -- --weight</code> for one reading in the terminal. See the <a href="../README.md#read-a-weight">README</a> for MiBeacon weight.</figcaption>
+        <figcaption>Use <code>cargo run -- --weight</code> for one settled reading. The desktop app repeats the cycle while it is running.</figcaption>
       </figure>
+      <h3>Choose the saved token</h3>
+      <ol class="steps">
+        <li>Load regular files matching <code>s200-*.keys</code> in <code>target/s200-registration</code> under the working directory. If that yields no tokens, try the same directory under the executable’s nearest <code>target</code> ancestor. Each <code>login_token</code> decodes from 24 hex digits to 12 bytes.</li>
+        <li>For a connectable scale, use the newest file by modification time that specifies its Bluetooth address. If there is no address match, use a single older file without an address only for an advertised ms113. The terminal can also stop on a decoded broadcast. If both options arrive together, the terminal selects the connected path.</li>
+      </ol>
+      <h3>Authenticate the Bluetooth session</h3>
+      <ol class="steps">
+        <li>Find service <code>FE95</code> and subscribe to control <code>0010</code>, auth <code>0019</code>, and data <code>001B</code> using <a href="#transport-heading">the shared transport</a>.</li>
+        <li>Write <code>24 00 00 00</code> to control. Generate 16 random app bytes <code>A</code> and send them in auth block <code>0B</code>. Receive 16 scale bytes <code>S</code> in block <code>0D</code>.</li>
+        <li>Expand 64 bytes with HKDF-SHA256 using the login token as input, <code>A ∥ S</code> as salt, and ASCII <code>mible-login-info</code> as info. Use bytes <code>[0,16)</code> for the device key, <code>[16,32)</code> for the app key, and <code>[32,36)</code> for the device IV.</li>
+        <li>Verify auth block <code>0C</code> as <code>HMAC-SHA256(device key, S ∥ A)</code>. Send <code>HMAC-SHA256(app key, A ∥ S)</code> in block <code>0A</code>. The authentication waits allow eight seconds per stage.</li>
+        <li>Start accepting readings after control <code>21 00 00 00</code>. Control <code>23 00 00 00</code> rejects the token and <code>E0 00 00 00</code> reports an unregistered scale. A mismatched HMAC also ends login.</li>
+      </ol>
+      <h3>Authenticate and parse a data block</h3>
+      <ol class="steps">
+        <li>Reassemble a framed notification on <code>001B</code>. Split its payload into <code>counter[2] ∥ ciphertext ∥ tag[4]</code>.</li>
+        <li>Open it with AES-128-CCM using the device key, no additional data, and nonce <code>device IV[4] ∥ zeros[4] ∥ counter[2] ∥ zeros[2]</code>. Discard packets that fail tag verification.</li>
+        <li>Scan the plaintext for the fields below. A valid settled field takes priority over live fields. Convert hundredths of a kilogram to kilograms for display.</li>
+      </ol>
+      <div class="fields" role="region" aria-label="Connected weight field layout" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">Field prefix</th><th scope="col">Payload</th><th scope="col">Result</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><code>02 30</code></th><td>Two-byte little-endian weight, greater than zero and below 30,000. For example, <code>02 30 57 1C</code> yields 72.55 kg.</td><td>Live weight. Identical consecutive live values are suppressed.</td></tr>
+            <tr><th scope="row"><code>length A0</code></th><td><code>length</code> UTF-8 bytes with exactly five comma-separated unsigned integers. The third is weight in the same range and the fifth is a nonzero UTC value.</td><td>Settled weight. The app uses the weight field and the desktop timestamps its saved record with the PC clock.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">The terminal starts a separate measurement window after login and exits on the first settled value. The window uses the same duration as discovery. The desktop keeps the session until stopped, disconnected, or idle for 15 seconds while waiting for a weight block.</p>
+      <p class="source"><a href="../crates/scale/src/login_keys.rs">Saved token selection</a> · <a href="../crates/scale/src/setup/connected_weight.rs">Login and weight parser</a></p>
+    </section>
+
+    <section class="panel" aria-labelledby="broadcast-heading">
+      <h2 id="broadcast-heading">Read encrypted MiBeacon broadcasts</h2>
+      <p>Set <code>S200_BINDKEY</code> to the scale’s 16-byte key as 32 hexadecimal digits. Both apps can decode supported advertisements while scanning.</p>
+      <figure>
+        <div class="diagram" role="region" aria-label="Scrollable MiBeacon packet diagram" tabindex="0">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 98" role="img" aria-labelledby="beacon-title beacon-description">
+            <title id="beacon-title">Encrypted MiBeacon service data</title>
+            <desc id="beacon-description">The packet contains a seven-byte header, optional MAC and capability fields, ciphertext, a three-byte extra counter, and a four-byte authentication tag.</desc>
+            <rect class="node" x="12" y="20" width="184" height="58" rx="6"/>
+            <rect class="node" x="200" y="20" width="176" height="58" rx="6"/>
+            <rect class="node-accent" x="380" y="20" width="174" height="58" rx="6"/>
+            <rect class="node" x="558" y="20" width="152" height="58" rx="6"/>
+            <rect class="node" x="714" y="20" width="114" height="58" rx="6"/>
+            <text class="node-title" x="104" y="45">Header</text>
+            <text class="node-detail" x="104" y="63">UUID, flags, product, frame</text>
+            <text class="node-title" x="288" y="45">Optional fields</text>
+            <text class="node-detail" x="288" y="63">MAC and capability</text>
+            <text class="node-title node-inverse" x="467" y="45">Ciphertext</text>
+            <text class="node-detail node-inverse" x="467" y="63">Encrypted objects</text>
+            <text class="node-title" x="634" y="45">Extra counter</text>
+            <text class="node-detail" x="634" y="63">3 bytes</text>
+            <text class="node-title" x="771" y="45">Tag</text>
+            <text class="node-detail" x="771" y="63">4 bytes</text>
+          </svg>
+        </div>
+      </figure>
+      <ol class="steps">
+        <li>Use recognized <code>FE95</code> service data with MiBeacon version 4 or 5 and both the encrypted (<code>0x0008</code>) and object-present (<code>0x0040</code>) bits. The byte after the six-byte discovery header is the frame counter.</li>
+        <li>When <code>0x0010</code> is set, read six MAC bytes from the packet. Otherwise use the six low bytes of the Bluetooth address in little-endian order. When <code>0x0020</code> is set, consume the capability byte and one additional byte if its <code>0x20</code> bit is set.</li>
+        <li>Take the last four bytes as the tag and the preceding three as the extra counter. Open the remaining ciphertext with AES-128-CCM, the bind key, additional byte <code>11</code>, and nonce <code>MAC[6] ∥ product LE16 ∥ frame[1] ∥ extra counter[3]</code>.</li>
+        <li>Walk the authenticated plaintext as objects of form <code>type LE16 ∥ length[1] ∥ value[length]</code>. For object <code>0x4E16</code> with nine value bytes, decode bytes <code>[1,5)</code> as a little-endian unsigned weight in hundredths of a kilogram. Yield it if positive.</li>
+      </ol>
+      <p class="source"><a href="../crates/scale/src/weight.rs">MiBeacon decoder</a></p>
     </section>
 
     <section class="panel" aria-labelledby="history-heading">
-      <h2 id="history-heading">How weight history is saved</h2>
+      <h2 id="history-heading">Desktop monitoring and weight history</h2>
       <figure>
         <div class="diagram" role="region" aria-label="Scrollable weight history diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="history-title history-description">
@@ -232,8 +354,32 @@
             <text class="node-detail node-inverse" x="715" y="69">Day, week, or month</text>
           </svg>
         </div>
-        <figcaption>History stays in <code>data/weights.sqlite3</code>. The dashed 30-day forecast appears after three saved readings.</figcaption>
+        <figcaption>Every valid reading can update the display. Settled readings and authenticated broadcast weights are eligible for history.</figcaption>
       </figure>
+      <h3>Watch and recover</h3>
+      <ol class="steps">
+        <li>Start a background worker and open SQLite. Load existing rows in timestamp order, then scan continuously. The worker checks for cancellation in 250 ms intervals while waiting for advertisements.</li>
+        <li>List discovered scales by address. Save eligible broadcast readings as they arrive. On a connectable scale with a saved token, stop the watcher and open a connected weight session.</li>
+        <li>Show live and settled values as the worker reports them. On disconnect or inactivity, restart scanning and keep the last settled weight visible. After a scan or connection error, display the error and retry after two seconds.</li>
+        <li>On Windows <code>WM_SIZE</code> with <code>SIZE_MINIMIZED</code>, queue a hide request. When it runs, hide only if the window is still minimized and visible. The worker continues listening. Double-click the tray icon to restore the window, or right-click it for <strong>Show weight window</strong> and <strong>Quit</strong>. Closing the window also stops monitoring. If the tray cannot start, Windows minimizes the window normally and the app reports a tray error.</li>
+      </ol>
+      <h3>Store one record per interval</h3>
+      <p>Use <code>data/weights.sqlite3</code> in the repository identified from the executable’s <code>target</code> ancestor, or under the working directory when that lookup fails. All scales share the <code>weigh_ins</code> table.</p>
+      <ol class="steps">
+        <li>Take the PC’s current time as Unix epoch milliseconds and store it as the primary key, paired with the positive integer weight in hundredths of a kilogram.</li>
+        <li>Insert only when the table has no row with <code>measured_at_ms ≥ current_ms − 86,400,000</code>. One SQLite statement makes the check and insert atomic. Exactly 24 hours is too soon.</li>
+      </ol>
+      <h3>Group the chart and calculate the forecast</h3>
+      <ol class="steps">
+        <li>Convert timestamps to local dates. Group them by date, by the Monday of that week, or by the first day of that month. Plot the mean weight of each bucket at its latest observed date.</li>
+        <li>Use the latest three to 30 raw records for the forecast. For each timestamp, calculate elapsed days <code>t</code> since the first selected record. Let <code>w</code> be weight in kilograms.</li>
+        <li>Draw a dashed line from the latest plotted point to 30 days after it, using the endpoint below. Display the line only if the endpoint weight is finite and positive.</li>
+      </ol>
+      <div class="formula">
+        <code>slope = Σ((t − mean(t)) × (w − mean(w))) / Σ((t − mean(t))²)</code>
+        <code>forecast kg = latest plotted kg + 30 × slope</code>
+      </div>
+      <p class="source"><a href="../crates/gui/src/desktop.rs">Desktop worker</a> · <a href="../crates/gui/src/tray.rs">Tray lifecycle</a> · <a href="../crates/gui/src/history.rs">SQLite rule</a> · <a href="../crates/gui/src/weight_plot.rs">Chart and forecast</a> · <a href="https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-size">Windows minimize message</a></p>
     </section>
 
     <section class="panel" aria-labelledby="registration-heading">
@@ -246,7 +392,7 @@
         <div class="diagram" role="region" aria-label="Scrollable scale registration diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="registration-title registration-description">
             <title id="registration-title">Scale registration in one run</title>
-            <desc id="registration-description">Xiaomi browser sign-in opens a Europe session, the scale exchanges keys over Bluetooth, Xiaomi issues signed authorization, then the scale confirms setup.</desc>
+            <desc id="registration-description">The app signs in through Xiaomi, derives setup keys with P-256 ECDH and HKDF-SHA256, obtains a signed identity and certificate from the Europe API, and sends them over Bluetooth for the scale to confirm.</desc>
             <defs>
               <marker id="registration-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
@@ -260,21 +406,106 @@
             <rect class="node" x="425" y="23" width="185" height="66" rx="12"/>
             <rect class="node-accent" x="630" y="23" width="195" height="66" rx="12"/>
             <text class="node-title" x="107" y="52">Sign in</text>
-            <text class="node-detail" x="107" y="72">One Xiaomi session</text>
-            <text class="node-title" x="312" y="52">Exchange keys</text>
-            <text class="node-detail" x="312" y="72">Awake S200</text>
-            <text class="node-title" x="517" y="52">Get authorization</text>
-            <text class="node-detail" x="517" y="72">Xiaomi Europe API</text>
-            <text class="node-title node-inverse" x="727" y="52">Confirm setup</text>
-            <text class="node-detail node-inverse" x="727" y="72">Scale replies over BLE</text>
+            <text class="node-detail" x="107" y="72">Browser and Europe API</text>
+            <text class="node-title" x="312" y="52">Derive setup keys</text>
+            <text class="node-detail" x="312" y="72">P-256 ECDH and HKDF</text>
+            <text class="node-title" x="517" y="52">Obtain Xiaomi proof</text>
+            <text class="node-detail" x="517" y="72">Device ID, signature, cert</text>
+            <text class="node-title node-inverse" x="727" y="52">Send proof over BLE</text>
+            <text class="node-detail node-inverse" x="727" y="72">Require control reply 11</text>
           </svg>
         </div>
         <figcaption>The terminal prints <code>Scale setup complete</code> after the scale confirms registration.</figcaption>
       </figure>
+      <h3>Find the scale and derive credentials</h3>
+      <ol class="steps">
+        <li>Open one <a href="#cloud-heading">Xiaomi cloud session</a> and verify it with the read-only device-count request. Then scan for the first connectable scale with product <code>0x4DCB</code>, MiBeacon v5, Standard Auth mode, setup requested, and the registered bit clear.</li>
+        <li>Open <code>FE95</code>, subscribe to control <code>0010</code> and auth <code>0019</code>, and read the negotiated ATT MTU. Write <code>A2 00 00 00</code> to control. Require auth block <code>00</code> with device info <code>02 00 00 00</code>, the supported no-OOB setup profile.</li>
+        <li>Generate an ephemeral P-256 key pair and write <code>15 00 00 00</code> to control. Send the app’s 64-byte <code>X ∥ Y</code> public key as auth block <code>03</code> and wait for its acknowledgment. Receive the scale’s block <code>03</code>, require 64 bytes, prepend the SEC1 uncompressed prefix <code>04</code>, and validate the point.</li>
+        <li>Compute the P-256 ECDH shared secret. Expand 64 bytes with HKDF-SHA256, no explicit salt, and ASCII <code>mible-setup-info</code>. Use bytes <code>[0,12)</code> as the login token, <code>[12,28)</code> as the bind key, and <code>[28,44)</code> as the identity-encryption key.</li>
+      </ol>
+      <h3>Obtain Xiaomi’s authorization</h3>
+      <ol class="steps">
+        <li>Send the Bluetooth address as <code>mac</code>, <code>model=xiaomi.scales.ms113</code>, and hex <code>token</code> to <code>/device/bltapplydid</code>. Accept the returned device ID from a string or the <code>did</code> property. It must contain 1–64 ASCII letters, digits, periods, hyphens, or underscores.</li>
+        <li>Create and sync a new <code>s200-*.keys</code> file under <code>target/s200-registration</code> with the login token, bind key, and Bluetooth address. The app retains it when the later registration result is uncertain.</li>
+        <li>Send <code>did</code> and the same <code>token</code> to <code>/v2/device/ble_standard_bind</code>. Set the <code>bind_key</code> property and <code>beacon_key</code> to the hex bind key. Send the <code>smac</code> property as an empty string.</li>
+        <li>Require <code>success=true</code>. Decode <code>cloud_cert</code> and <code>cloud_sign</code> as Base64 or Base64URL, with or without padding. The certificate must start with <code>30</code> and contain at most 4,096 bytes. Require a 64-byte signature and a nonzero unsigned 32-bit <code>utc</code>.</li>
+      </ol>
+      <h3>Send the proof and wait for the scale</h3>
+      <ol class="steps">
+        <li>Make an 88-byte plaintext. Take the last up to 20 bytes of the DID, right-align them in bytes <code>[0,20)</code>, and pad the left with zeroes. Append the 64-byte signature and the four-byte little-endian UTC.</li>
+        <li>Encrypt it with AES-128-CCM using the identity key. Use nonce <code>10 11 12 13 14 15 16 17 18 19 1A 1B</code>, ASCII <code>devID</code> as additional authenticated data, and append the four-byte tag.</li>
+        <li>Write <code>13 00 00 00</code> to control. Send the encrypted identity as auth block <code>00</code> and wait for its acknowledgment. Send the certificate bytes as block <code>07</code> with the certificate fragment limit below.</li>
+      </ol>
+      <div class="fields" role="region" aria-label="Registration outcomes" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">Scale response</th><th scope="col">Registration outcome</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Control <code>11 00 00 00</code></th><td>Success. The CLI reports the scale’s address and completes setup.</td></tr>
+            <tr><th scope="row">Control <code>12 00 00 00</code> or <code>E1 00 00 00</code></th><td>The scale rejects registration or reports it is already registered.</td></tr>
+            <tr><th scope="row">Transfer acknowledgment only</th><td>Wait another five seconds for a control result. If none arrives, full registration reports an incomplete result and gives the saved keys path.</td></tr>
+            <tr><th scope="row">Transfer failure or no reply</th><td>Report a transport error or timeout.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="source"><a href="../crates/scale/src/setup/registration.rs">Registration flow</a> · <a href="../crates/scale/src/setup/registration_crypto.rs">Key derivation and identity encryption</a> · <a href="../crates/scale/src/cloud_sign_in/registration_api.rs">Cloud registration requests</a></p>
+    </section>
+
+    <section class="panel" aria-labelledby="transport-heading">
+      <h2 id="transport-heading">Standard Auth and weight packet framing</h2>
+      <p>The app resolves service <code>FE95</code> and its required characteristics with uncached queries. It registers a value-change handler and enables notifications or, if unavailable, indications. Writes use GATT Write Without Response.</p>
+      <p class="note">Packet literals are hexadecimal. <code>LE16</code> denotes a two-byte little-endian integer, and <code>∥</code> means concatenate bytes in the order shown.</p>
+      <div class="fields" role="region" aria-label="Standard Auth frame formats" tabindex="0">
+        <table>
+          <caption>Frame bytes on auth <code>0019</code> and received data <code>001B</code></caption>
+          <thead><tr><th scope="col">Frame</th><th scope="col">Action</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><code>00 00 00 kind count LE16</code></th><td>Announce a fragmented block. Receiver validates incoming counts from 1 through 32 and writes <code>00 00 01 01</code> when ready.</td></tr>
+            <tr><th scope="row"><code>index LE16 ∥ fragment</code></th><td>Send after ready. Receiver requires ordered indexes from 1 to count and nonempty fragment bodies. It concatenates them and writes <code>00 00 01 00</code> on completion.</td></tr>
+            <tr><th scope="row"><code>00 00 02 kind ∥ payload</code></th><td>Receive a single-packet block and acknowledge with <code>00 00 03 00</code>.</td></tr>
+            <tr><th scope="row"><code>00 00 01 05</code></th><td>The scale reports transfer failure on the auth channel.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Outgoing blocks are announced even when one fragment is enough. The fragment payload limit is <code>ATT MTU − 3 − 2</code>, allowing three bytes for ATT and two for the index. For certificate block <code>07</code> cap the MTU at 23, giving at most 18 payload bytes per fragment. Registration gives each receive or acknowledgment wait five seconds.</p>
+      <p class="source"><a href="../crates/scale/src/setup.rs">GATT lookup</a> · <a href="../crates/scale/src/setup/certificate_transfer.rs">Transport and subscriptions</a></p>
+    </section>
+
+    <section class="panel" aria-labelledby="cloud-heading">
+      <h2 id="cloud-heading">Xiaomi browser session and Europe API</h2>
+      <h3>Get the smart-home session</h3>
+      <ol class="steps">
+        <li>GET <code>https://account.xiaomi.com/longPolling/loginUrl</code> with <code>sid=xiaomiio</code>, callback <code>https://sts.api.io.mi.com/sts</code>, and current epoch milliseconds in <code>_dc</code>. Require HTTP 200, strip the optional <code>&amp;&amp;&amp;START&amp;&amp;&amp;</code> prefix, and parse <code>loginUrl</code>, <code>lp</code>, and <code>timeout</code>. Both returned URLs must use HTTPS on port 443 and belong to <code>account.xiaomi.com</code>, <code>account.mi.com</code>, or their subdomains.</li>
+        <li>Print the one-time <code>loginUrl</code> for the user’s browser and poll <code>lp</code> until the server lifetime expires, capped at five minutes. An HTTP 200 is the authorization reply. HTTP 202, 204, 408, 504, and request timeouts retry after up to 400 ms.</li>
+        <li>Read nonempty <code>ssecurity</code>, decimal <code>userId</code> when present, and <code>location</code>. Require the HTTPS callback host <code>sts.api.io.mi.com</code> and path <code>/sts</code>. GET the callback and require its nonempty <code>serviceToken</code> cookie from a 2xx or 3xx reply. The HTTP client sends requests without following redirects. The CLI holds the session in memory for the command.</li>
+      </ol>
+      <h3>Sign and send an API request</h3>
+      <ol class="steps">
+        <li>Build a 12-byte nonce from eight cryptographically random bytes and four big-endian bytes for Unix epoch minutes. Compute <code>key = SHA256(Base64Decode(ssecurity) ∥ nonce)</code> and <code>signedNonce = Base64(key)</code>.</li>
+        <li>Use the first formula below on the raw JSON. Encrypt both the JSON and that hash separately using RC4 with the raw key and the first 1,024 stream bytes discarded. Base64-encode both ciphertexts as <code>data</code> and <code>rc4_hash__</code>.</li>
+        <li>Calculate the final signature using the encrypted fields. POST the URL-encoded form below to <code>https://de.api.io.mi.com/app</code> plus the request path. Require an account ID for these requests.</li>
+        <li>Require HTTP 200 and parse Xiaomi’s JSON. If the response body is encrypted, Base64-decode and apply RC4 with the same key and stream discard before parsing. A reply passes when <code>code=0</code> and <code>result</code> is present.</li>
+      </ol>
+      <div class="formula">
+        <code>first hash = Base64(SHA1("POST&amp;" ∥ path ∥ "&amp;data=" ∥ raw JSON ∥ "&amp;" ∥ signedNonce))</code>
+        <code>signature = Base64(SHA1("POST&amp;" ∥ path ∥ "&amp;data=" ∥ data ∥ "&amp;rc4_hash__=" ∥ rc4_hash__ ∥ "&amp;" ∥ signedNonce))</code>
+      </div>
+      <div class="fields" role="region" aria-label="Xiaomi API request fields" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">Part</th><th scope="col">Fields</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Form</th><td><code>data</code>, <code>rc4_hash__</code>, <code>signature</code>, <code>ssecurity</code>, and <code>_nonce</code> (Base64).</td></tr>
+            <tr><th scope="row">Cookies</th><td><code>userId</code>, <code>serviceToken</code>, <code>yetAnotherServiceToken</code> (same token), and <code>locale=en_GB</code>.</td></tr>
+            <tr><th scope="row">Xiaomi headers</th><td><code>x-xiaomi-protocal-flag-cli: PROTOCAL-HTTP2</code> and <code>MIOT-ENCRYPT-ALGORITHM: ENCRYPT-RC4</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">The read-only check uses <code>/v2/user/get_device_cnt</code> and JSON <code>{"fetch_own":true,"fetch_share":false}</code>. Standalone browser sign-in stops at the callback. The cloud check and registration additionally make the API request.</p>
+      <p class="source"><a href="../crates/scale/src/cloud_sign_in.rs">Browser sign-in</a> · <a href="../crates/scale/src/cloud_sign_in/cloud_api.rs">Signed Europe requests</a></p>
     </section>
 
     <section class="panel" aria-labelledby="setup-heading">
-      <h2 id="setup-heading">Inspect scale setup</h2>
+      <h2 id="setup-heading">Run setup diagnostics</h2>
       <div class="quick-start">
         <code class="command">cargo run -- --check-setup</code>
         <p>Wake the scale, then sign in once. See a result for each Bluetooth and Xiaomi account check.</p>
@@ -283,15 +514,32 @@
         <code class="command">cargo run -- --setup-info --seconds 30</code>
         <p>Wake the scale during the scan. No bind key is required.</p>
       </div>
-      <div class="help">
-        <p><strong>Product ID</strong>Identifies the S200 variant.</p>
-        <p><strong>Authentication</strong>Shows the setup protocol advertised in MiBeacon v5.</p>
-        <p><strong>Registration</strong>Shows whether the scale is registered or requesting setup.</p>
+      <p class="note"><code>--setup-info</code> scans for the full window. It prints each address’s first setup report and any changes to its product ID, version, or setup flags. It returns an error when no decoded setup report arrives.</p>
+      <h3>How the five checks depend on each other</h3>
+      <div class="fields" role="region" aria-label="Setup checks and dependencies" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">Check</th><th scope="col">Pass condition or dependency</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Bluetooth S200 discovery</th><td>Prefer a connectable scale and then one with setup info. For equal ranks use the latest reported candidate. Stop early when it has both. If discovery fails, skip readiness and Standard Auth GATT.</td></tr>
+            <tr><th scope="row">S200 registration readiness</th><td>Require the <a href="#registration-heading">unregistered ms113 setup profile</a> in the advertisement.</td></tr>
+            <tr><th scope="row">Standard Auth over Bluetooth</th><td>Require a connectable advertisement and uncached lookup of <code>FE95/0019</code>. Run this even if readiness failed.</td></tr>
+            <tr><th scope="row">Xiaomi browser sign-in</th><td>Get the smart-home session even if Bluetooth failed. If sign-in fails, skip the Europe API check.</td></tr>
+            <tr><th scope="row">Xiaomi Europe API</th><td>Reuse the same session to send the signed device-count request.</td></tr>
+          </tbody>
+        </table>
       </div>
+      <p><code>--check-setup</code> prints pass, fail, and skip totals. Any failed or skipped check yields a nonzero exit code. The checks leave the scale’s registration state untouched.</p>
+      <h3>Test a local certificate</h3>
       <div class="quick-start" style="margin-top: .75rem">
         <code class="command">cargo run -- --setup-test-cert --seconds 30</code>
         <p>Try setup using the certificate at <code>crates/scale/src/setup/s200-local-test.der</code> and an encrypted test identity.</p>
       </div>
+      <ol class="steps">
+        <li>Find an eligible unregistered ms113 and read the local DER file. Use the same device-info check, ephemeral P-256 public keys, and HKDF as the cloud-backed flow.</li>
+        <li>Create the ASCII identity <code>test-</code> followed by the first seven bytes of the app public key as 14 lowercase hex digits. Prefix one zero byte and encrypt it using the same identity key, nonce, and additional data. Save candidate credentials under <code>target/s200-setup-test</code>.</li>
+        <li>Send the encrypted identity and local certificate using blocks <code>00</code> and <code>07</code>. The scale’s control response determines registration. The test also exits successfully if the scale acknowledges delivery and gives no registration result.</li>
+      </ol>
+      <h3>Check the account separately</h3>
       <div class="quick-start">
         <code class="command">cargo run -- --xiaomi-sign-in</code>
         <p>Verify Xiaomi smart-home account authorization using a one-time browser link.</p>
@@ -300,23 +548,23 @@
         <code class="command">cargo run -- --xiaomi-check-cloud</code>
         <p>Sign in and check whether Xiaomi’s Europe API accepts a signed, read-only account request.</p>
       </div>
+      <p class="source"><a href="../crates/scale/src/diagnostics.rs">Check dependencies</a> · <a href="../crates/cli/src/main.rs">CLI results and exit codes</a></p>
     </section>
 
     <section class="panel" aria-labelledby="help-heading">
       <h2 id="help-heading">If the connection fails</h2>
       <div class="help">
-        <p><strong>Scale missing</strong>Wake it while the app is listening.</p>
+        <p><strong>Scale missing</strong>Wake it while the app is listening. Use <code>--setup-info</code> to confirm that it is advertising the expected product ID and setup state.</p>
         <p><strong>Scale unreachable</strong>Close Xiaomi Home if it is connected, then wake the scale again.</p>
         <p><strong>Bluetooth unavailable</strong>Turn Bluetooth on. The desktop app retries automatically.</p>
+        <p><strong>Login token rejected</strong>Check the saved registration file for the scale’s address and run <code>--weight</code> again. Restart the desktop app after replacing its saved credentials.</p>
+        <p><strong>Certificate delivered</strong>Check the reported control response. Delivery by itself only proves that the Bluetooth transfer completed.</p>
+        <p><strong>Browser link expired</strong>Rerun the command and sign in with the newly printed link before the deadline.</p>
       </div>
     </section>
 
     <footer>
-      Source code
-      <a href="../crates/cli/src/main.rs">Command line</a>
-      <a href="../crates/gui/src/desktop.rs">Desktop app</a>
-      <a href="../crates/scale/src/discovery.rs">Scale discovery</a>
-      <a href="../crates/scale/src/lib.rs">GATT connection</a>
+      <a href="../README.md">Repository README</a>
     </footer>
   </main>
 </body>

@@ -79,7 +79,7 @@ cargo run -- --setup-info --seconds 30
 
 Step on the scale during the scan. This read-only command reports the advertised product ID and MiBeacon version without a bind key. For MiBeacon v5 it also reports the authentication mode, registration status, and whether the scale is requesting setup.
 
-A capture of first-time registration on the S200 `ms113` shows a key exchange and a Xiaomi Cloud certificate. The capture documents this firmware variant and provides a starting point for a Rust setup flow. [S200 registration capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#registration-for-completeness-not-needed-in-practice)
+The connection guide shows how the app derives the login token and bind key with P-256 ECDH and HKDF-SHA256, requests Xiaomi's signed authorization, and sends it to the scale. [Registration algorithm](docs/scale-connection.html#registration-heading) · [S200 registration capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#registration-for-completeness-not-needed-in-practice)
 
 To try local Standard Auth setup on an unregistered S200 `ms113`, place your test certificate at `crates/scale/src/setup/s200-local-test.der` and run from the repository root while the scale is requesting setup.
 
@@ -122,4 +122,4 @@ The build script runs Clippy across all workspace targets before compiling the C
 | [`blt_unlock`](crates/cli) | Terminal connection tool |
 | [`blt_unlock_gui`](crates/gui) | egui desktop discovery app |
 
-Open the [SVG connection guide](docs/scale-connection.html) in a browser for diagrams and troubleshooting.
+Open the [connection guide](docs/scale-connection.html) in a browser for SVG diagrams and step-by-step details on discovery, registration, weight decoding, history, and diagnostics.
