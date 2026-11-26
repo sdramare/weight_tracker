@@ -2,6 +2,8 @@
 
 #![cfg(windows)]
 
+mod cloud_sign_in;
+mod diagnostics;
 mod discovery;
 mod setup;
 mod types;
@@ -17,6 +19,8 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatu
 use windows::Devices::Bluetooth::{BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
+pub use cloud_sign_in::{XiaomiSignInLink, verify_xiaomi_cloud_europe, verify_xiaomi_sign_in};
+pub use diagnostics::{SetupCheck, SetupCheckStatus, check_scale_setup};
 pub use setup::{
     ScaleSetupInfo, SetupCertificateReply, probe_setup_service, send_setup_test_certificate,
 };

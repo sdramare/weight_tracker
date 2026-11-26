@@ -210,6 +210,10 @@
     <section class="panel" aria-labelledby="setup-heading">
       <h2 id="setup-heading">Inspect scale setup</h2>
       <div class="quick-start">
+        <code class="command">cargo run -- --check-setup</code>
+        <p>Wake the scale, then sign in once. See a result for each Bluetooth and Xiaomi account check.</p>
+      </div>
+      <div class="quick-start">
         <code class="command">cargo run -- --setup-info --seconds 30</code>
         <p>Wake the scale during the scan. No bind key is required.</p>
       </div>
@@ -221,6 +225,14 @@
       <div class="quick-start" style="margin-top: .75rem">
         <code class="command">cargo run -- --setup-test-cert --seconds 30</code>
         <p>Exchange keys with an unregistered S200 ms113, then send an encrypted test identity and certificate.</p>
+      </div>
+      <div class="quick-start">
+        <code class="command">cargo run -- --xiaomi-sign-in</code>
+        <p>Verify Xiaomi smart-home account authorization using a one-time browser link.</p>
+      </div>
+      <div class="quick-start">
+        <code class="command">cargo run -- --xiaomi-check-cloud</code>
+        <p>Sign in and check whether Xiaomi’s Europe API accepts a signed, read-only account request.</p>
       </div>
     </section>
 

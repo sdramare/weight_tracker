@@ -50,6 +50,14 @@ cargo run -- --weight --seconds 45
 ## Inspect scale setup
 
 ```powershell
+cargo run -- --check-setup
+```
+
+Wake the S200 during the scan. The command checks Bluetooth discovery, the advertised registration mode, and the Standard Auth GATT characteristic. If Xiaomi supplies a browser link, sign in once. The same session is used to check the Europe API. The terminal reports pass, fail, or skip for each check. These checks are read-only.
+
+To inspect only the setup information in the scale's broadcasts, run:
+
+```powershell
 cargo run -- --setup-info --seconds 30
 ```
 
@@ -64,6 +72,22 @@ cargo run -- --setup-test-cert --seconds 30
 ```
 
 The CLI requests setup information, exchanges P-256 public keys, and sends an encrypted local test device ID followed by the bundled self-signed certificate. A transfer acknowledgment confirms delivery only. The scale reports registration on its control characteristic. Candidate credentials are saved under `target/s200-setup-test` before the registration request so they remain available if the scale completes setup and disconnects.
+
+## Verify Xiaomi browser sign-in
+
+```powershell
+cargo run -- --xiaomi-sign-in
+```
+
+Open the one-time link printed in the terminal. Enter your credentials on Xiaomi's page and keep the terminal open until it confirms the smart-home session. The command checks account authorization. Scale registration is a separate step.
+
+To check whether the Europe API accepts the session, sign in through a new one-time link.
+
+```powershell
+cargo run -- --xiaomi-check-cloud
+```
+
+The command makes a read-only, signed request for your account's device count and reports whether Xiaomi accepted it. The session stays in memory for that run.
 
 ## Build and test
 

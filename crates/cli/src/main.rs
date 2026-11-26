@@ -1,10 +1,14 @@
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --setup-test-cert] [--seconds <1-60>]\n\
+const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --setup-test-cert | --check-setup] [--seconds <1-60>]\n\
+    blt_unlock --xiaomi-sign-in | --xiaomi-check-cloud\n\
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
     Use --weight with S200_BINDKEY set to wait for a stabilized weight.\n\
     Use --setup-info to inspect the setup information in S200 broadcasts.\n\
     Use --setup-test-cert to try Standard Auth setup with the bundled test certificate.\n\
+    Use --check-setup for Bluetooth and Xiaomi account checks in one run.\n\
+    Use --xiaomi-sign-in to verify Xiaomi account authorization in your browser.\n\
+    Use --xiaomi-check-cloud to verify the session against Xiaomi's Europe API.\n\
     The discovery timeout defaults to 30 seconds.";
 const DEFAULT_SECONDS: u64 = 30;
 
@@ -13,6 +17,9 @@ enum Command {
     Weight,
     SetupInfo,
     SetupTestCertificate,
+    SetupCheck,
+    XiaomiSignIn,
+    XiaomiCloudCheck,
 }
 
 fn main() -> ExitCode {
@@ -46,10 +53,22 @@ fn main() -> ExitCode {
             Some("--setup-test-cert") if command.is_none() => {
                 command = Some(Command::SetupTestCertificate)
             }
+            Some("--check-setup") if command.is_none() => command = Some(Command::SetupCheck),
+            Some("--xiaomi-sign-in") if command.is_none() => command = Some(Command::XiaomiSignIn),
+            Some("--xiaomi-check-cloud") if command.is_none() => {
+                command = Some(Command::XiaomiCloudCheck)
+            }
             _ => return usage_error(),
         }
     }
 
+    if matches!(
+        command,
+        Some(Command::XiaomiSignIn | Command::XiaomiCloudCheck)
+    ) && seconds.is_some()
+    {
+        return usage_error();
+    }
     run(
         seconds.unwrap_or(DEFAULT_SECONDS),
         command.unwrap_or(Command::Services),
@@ -82,6 +101,9 @@ fn run(seconds: u64, command: Command) -> ExitCode {
             show_setup_certificate_test(duration),
             "Scale setup test incomplete",
         ),
+        Command::SetupCheck => return check_setup(duration),
+        Command::XiaomiSignIn => (show_xiaomi_sign_in(), "Xiaomi sign-in incomplete"),
+        Command::XiaomiCloudCheck => (check_xiaomi_cloud(), "Xiaomi cloud check incomplete"),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -90,6 +112,67 @@ fn run(seconds: u64, command: Command) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(windows)]
+fn check_setup(duration: std::time::Duration) -> ExitCode {
+    use xiaomi_s200::SetupCheckStatus;
+
+    println!(
+        "Step on the S200 to wake it. The Bluetooth scan lasts up to {} seconds.",
+        duration.as_secs()
+    );
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+    xiaomi_s200::check_scale_setup(
+        duration,
+        present_xiaomi_link,
+        |check, status| match status {
+            SetupCheckStatus::Started => println!("[RUN]  {check}"),
+            SetupCheckStatus::Passed => {
+                passed += 1;
+                println!("[PASS] {check}");
+            }
+            SetupCheckStatus::Failed(error) => {
+                failed += 1;
+                println!("[FAIL] {check} — {error}");
+            }
+            SetupCheckStatus::Skipped(prerequisite) => {
+                skipped += 1;
+                println!("[SKIP] {check} — requires {prerequisite}");
+            }
+        },
+    );
+    println!("Setup checks: {passed} passed, {failed} failed, {skipped} skipped.");
+    if failed == 0 && skipped == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+#[cfg(windows)]
+fn show_xiaomi_sign_in() -> std::io::Result<()> {
+    println!("Requesting a browser sign-in link from Xiaomi...");
+    xiaomi_s200::verify_xiaomi_sign_in(present_xiaomi_link)?;
+    println!("Xiaomi issued a smart-home account session. Sign-in confirmed.");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn check_xiaomi_cloud() -> std::io::Result<()> {
+    println!("Requesting a browser sign-in link to check Xiaomi's Europe API...");
+    xiaomi_s200::verify_xiaomi_cloud_europe(present_xiaomi_link)?;
+    println!("Xiaomi's Europe API accepted the signed request.");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn present_xiaomi_link(link: &xiaomi_s200::XiaomiSignInLink) {
+    println!("Open this one-time link in your browser and sign in on Xiaomi’s page.");
+    println!("{link}");
+    println!("Keep this terminal open while Xiaomi confirms sign-in.");
 }
 
 #[cfg(windows)]
