@@ -6,7 +6,7 @@ const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --se
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
     Use --weight to read from an S200 using its saved setup token or S200_BINDKEY.\n\
     Use --setup-info to inspect the setup information in S200 broadcasts.\n\
-    Use --setup-test-cert to try Standard Auth setup with the bundled test certificate.\n\
+    Use --setup-test-cert to try Standard Auth setup with a local test certificate.\n\
     Use --check-setup for Bluetooth and Xiaomi account checks in one run.\n\
     Use --register-scale to sign in once and register an unregistered S200 ms113.\n\
     Use --xiaomi-sign-in to verify Xiaomi account authorization in your browser.\n\

@@ -1,1 +1,12 @@
 /target/
+
+# Local certificate and key material
+/certs/
+*.cer
+*.crt
+*.der
+*.key
+*.keys
+*.p12
+*.pem
+*.pfx

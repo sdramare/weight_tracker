@@ -1,8 +1,8 @@
-use std::fmt;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
+use std::{fmt, fs};
 
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
     GattCharacteristic, GattCharacteristicProperties,
@@ -17,7 +17,7 @@ use super::{
     Apartment, Scale, check_service_status, open_scale_device, setup_characteristic, setup_service,
 };
 
-const CERTIFICATE: &[u8] = include_bytes!("s200-local-test.der");
+const TEST_CERTIFICATE_PATH: &str = "crates/scale/src/setup/s200-local-test.der";
 const CERTIFICATE_BLOCK: u8 = 0x07;
 const CERTIFICATE_MTU: u16 = 23;
 const DEVICE_INFO_OR_ID: u8 = 0x00;
@@ -60,13 +60,19 @@ pub fn send_setup_test_certificate(
     scale: &Scale,
     credentials_directory: &Path,
 ) -> io::Result<SetupCertificateReply> {
+    let certificate = fs::read(TEST_CERTIFICATE_PATH).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("could not read local test certificate at {TEST_CERTIFICATE_PATH}: {error}"),
+        )
+    })?;
     register_with(scale, |registration| {
         let encrypted_id = registration.encrypted_device_id()?;
         registration.save_trial_credentials(credentials_directory)?;
         Ok((
             RegistrationProof {
                 encrypted_id,
-                certificate: CERTIFICATE.to_vec(),
+                certificate,
             },
             (),
         ))
@@ -442,11 +448,13 @@ impl Drop for Subscription {
 
 #[cfg(test)]
 mod tests {
-    use super::{CERTIFICATE, CERTIFICATE_BLOCK, PUBLIC_KEY_BLOCK, block_packets};
+    use super::{CERTIFICATE_BLOCK, PUBLIC_KEY_BLOCK, block_packets};
+
+    const CERTIFICATE_PAYLOAD: &[u8] = &[0x30; 329];
 
     #[test]
     fn frames_the_entire_certificate_at_small_mtu() {
-        let (header, packets) = block_packets(23, CERTIFICATE_BLOCK, CERTIFICATE).unwrap();
+        let (header, packets) = block_packets(23, CERTIFICATE_BLOCK, CERTIFICATE_PAYLOAD).unwrap();
         assert_eq!(header, [0, 0, 0, 7, 19, 0]);
         assert_eq!(packets.len(), 19);
         assert!(packets.iter().all(|packet| packet.len() <= 20));
@@ -455,14 +463,14 @@ mod tests {
             .flat_map(|packet| &packet[2..])
             .copied()
             .collect();
-        assert_eq!(data, CERTIFICATE);
+        assert_eq!(data, CERTIFICATE_PAYLOAD);
     }
 
     #[test]
     fn limits_certificate_packets_at_larger_mtu() {
-        let minimum_mtu = block_packets(23, CERTIFICATE_BLOCK, CERTIFICATE).unwrap();
+        let minimum_mtu = block_packets(23, CERTIFICATE_BLOCK, CERTIFICATE_PAYLOAD).unwrap();
         assert_eq!(
-            block_packets(251, CERTIFICATE_BLOCK, CERTIFICATE).unwrap(),
+            block_packets(251, CERTIFICATE_BLOCK, CERTIFICATE_PAYLOAD).unwrap(),
             minimum_mtu
         );
     }
