@@ -17,7 +17,9 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatu
 use windows::Devices::Bluetooth::{BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
-pub use setup::{ScaleSetupInfo, check_setup_test_certificate, probe_setup_service};
+pub use setup::{
+    ScaleSetupInfo, SetupCertificateReply, probe_setup_service, send_setup_test_certificate,
+};
 pub use types::{BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight};
 pub use weight::ScaleBindKey;
 use weight::WeightDecoder;

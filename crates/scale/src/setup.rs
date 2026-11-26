@@ -1,38 +1,56 @@
-mod certificate;
+mod certificate_transfer;
 
 use std::{fmt, io};
 
-use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothUuidHelper};
+use windows::Devices::Bluetooth::GenericAttributeProfile::{GattCharacteristic, GattDeviceService};
+use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice, BluetoothUuidHelper};
 
 use super::{Apartment, Scale, check_service_status, open_scale_device};
 
-pub use certificate::check_setup_test_certificate;
+pub use certificate_transfer::{SetupCertificateReply, send_setup_test_certificate};
 
 /// Connects to the scale and checks for the Xiaomi Standard Auth characteristic.
 pub fn probe_setup_service(scale: &Scale) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
     let device = open_scale_device(scale)?;
+    let service = setup_service(&device)?;
+    setup_characteristic(&service, 0x0019)?;
+    Ok(())
+}
+
+fn setup_service(device: &BluetoothLEDevice) -> io::Result<GattDeviceService> {
     let service_uuid = BluetoothUuidHelper::FromShortId(0xfe95)?;
-    let auth_uuid = BluetoothUuidHelper::FromShortId(0x0019)?;
     let result = device
         .GetGattServicesForUuidWithCacheModeAsync(service_uuid, BluetoothCacheMode::Uncached)?
         .join()?;
     check_service_status(result.Status()?)?;
     let services = result.Services()?;
-    for index in 0..services.Size()? {
-        let result = services
-            .GetAt(index)?
-            .GetCharacteristicsForUuidWithCacheModeAsync(auth_uuid, BluetoothCacheMode::Uncached)?
-            .join()?;
-        check_service_status(result.Status()?)?;
-        if result.Characteristics()?.Size()? > 0 {
-            return Ok(());
-        }
+    if services.Size()? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the scale did not expose the Xiaomi setup service (FE95)",
+        ));
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "the scale did not expose the Xiaomi Standard Auth characteristic",
-    ))
+    Ok(services.GetAt(0)?)
+}
+
+fn setup_characteristic(
+    service: &GattDeviceService,
+    short_uuid: u32,
+) -> io::Result<GattCharacteristic> {
+    let uuid = BluetoothUuidHelper::FromShortId(short_uuid)?;
+    let result = service
+        .GetCharacteristicsForUuidWithCacheModeAsync(uuid, BluetoothCacheMode::Uncached)?
+        .join()?;
+    check_service_status(result.Status()?)?;
+    let characteristics = result.Characteristics()?;
+    if characteristics.Size()? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("the scale did not expose setup characteristic {short_uuid:04X}"),
+        ));
+    }
+    Ok(characteristics.GetAt(0)?)
 }
 
 /// Product and setup information advertised by a Xiaomi Smart Scale S200.
@@ -59,6 +77,19 @@ enum Authentication {
 }
 
 impl ScaleSetupInfo {
+    /// The supported variant is unregistered and currently requesting Standard Auth setup.
+    pub fn requests_certificate_test(&self) -> bool {
+        self.product_id == 0x4dcb
+            && matches!(
+                self.flags,
+                Some(SetupFlags {
+                    authentication: Authentication::Standard,
+                    registered: false,
+                    solicited: true,
+                })
+            )
+    }
+
     pub(super) fn from_mibeacon(data: &[u8]) -> Option<Self> {
         let [
             0x95,

@@ -11,7 +11,6 @@ windows = { version = "0.62.2", features = [
     "Devices_Bluetooth_GenericAttributeProfile",
     "Foundation_Collections",
     "Storage_Streams",
-    "Win32_Security_Cryptography",
     "Win32_System_WinRT",
 ] }
 

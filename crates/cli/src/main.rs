@@ -4,7 +4,7 @@ const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --se
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
     Use --weight with S200_BINDKEY set to wait for a stabilized weight.\n\
     Use --setup-info to inspect the setup information in S200 broadcasts.\n\
-    Use --setup-test-cert to check the bundled test certificate and probe the scale's setup service.\n\
+    Use --setup-test-cert to send the bundled test certificate over Bluetooth.\n\
     The discovery timeout defaults to 30 seconds.";
 const DEFAULT_SECONDS: u64 = 30;
 
@@ -181,20 +181,47 @@ fn run(_seconds: u64, _command: Command) -> ExitCode {
 
 #[cfg(windows)]
 fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result<()> {
-    let certificate = xiaomi_s200::check_setup_test_certificate();
-    match &certificate {
-        Ok(()) => println!("Local test certificate chained to Mijia Root."),
-        Err(error) => println!("Local certificate check failed: {error}"),
-    }
+    use std::{io, ops::ControlFlow};
+    use xiaomi_s200::SetupCertificateReply;
+
     println!(
-        "Probing the S200 setup service for up to {} seconds. Step on the scale to wake it.",
+        "Looking for an unregistered S200 ms113 for up to {} seconds. Step on the scale to wake it.",
         duration.as_secs()
     );
-    let scale = xiaomi_s200::find_connectable_scale(duration)?;
+    let mut candidate = None;
+    xiaomi_s200::discover_scales(duration, |scale| {
+        if scale.is_connectable()
+            && scale
+                .setup_info()
+                .is_some_and(|info| info.requests_certificate_test())
+        {
+            candidate = Some(scale.clone());
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })?;
+    let scale = candidate.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no connectable, unregistered S200 ms113 requested setup",
+        )
+    })?;
     if let Some(info) = scale.setup_info() {
         println!("{info}");
     }
-    xiaomi_s200::probe_setup_service(&scale)?;
-    println!("The scale exposed its Xiaomi Standard Auth characteristic.");
-    certificate
+    println!(
+        "Sending the test certificate to {} over Bluetooth.",
+        scale.address()
+    );
+    let reply = xiaomi_s200::send_setup_test_certificate(&scale)?;
+    match reply {
+        SetupCertificateReply::RegistrationSucceeded
+        | SetupCertificateReply::ReceivedWithoutRegistrationResult => {
+            println!("{reply}.");
+            Ok(())
+        }
+        SetupCertificateReply::RegistrationFailed | SetupCertificateReply::AlreadyRegistered => {
+            Err(io::Error::other(reply.to_string()))
+        }
+    }
 }
