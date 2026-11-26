@@ -74,6 +74,7 @@
     .note { padding: .65rem .85rem; border-inline-start: 3px solid var(--accent); background: var(--soft); }
     .panel > h2 + p { margin-top: .25rem; }
     .panel > h2 + .quick-start { margin-top: .6rem; }
+    .panel > figure + p { margin-top: .75rem; }
     .formula { margin-block: .6rem; padding: .6rem .85rem; background: var(--soft); border-radius: .4rem; }
     .formula code { display: block; }
     .quick-start p, figcaption, .help p, footer { font-size: .9rem; }
@@ -152,7 +153,7 @@
             <path class="arrow broadcast" d="M698 144H424" marker-end="url(#broadcast-arrow)"/>
             <text class="message" x="281" y="180">Deliver advertisements</text>
             <path class="arrow broadcast" d="M420 189H146" marker-end="url(#broadcast-arrow)"/>
-            <text class="message" x="281" y="225">Request uncached GATT discovery</text>
+            <text class="message" x="281" y="225">Ask for a fresh service list</text>
             <path class="arrow" d="M142 234H416" marker-end="url(#request-arrow)"/>
             <text class="message" x="559" y="270">Connect and discover services</text>
             <path class="arrow" d="M420 279H694" marker-end="url(#request-arrow)"/>
@@ -162,14 +163,15 @@
             <path class="arrow" d="M420 369H146" marker-end="url(#request-arrow)"/>
           </svg>
         </div>
-        <figcaption>The terminal prints the scale’s address and the services it returned, such as <code>0000FE95-0000-1000-8000-00805F9B34FB</code>.</figcaption>
+        <figcaption>The terminal prints the scale’s address and the identifiers of the services it found. For the Xiaomi service, it prints the full UUID <code>0000FE95-0000-1000-8000-00805F9B34FB</code>. The guide uses the short form <code>FE95</code>.</figcaption>
       </figure>
+      <p>GATT (Generic Attribute Profile) is how a Bluetooth Low Energy device exposes its data and operations to a connected app. A <strong>service</strong> groups related functions. Its <strong>characteristics</strong> are individual endpoints that can accept writes or send updates. A UUID identifies a service or characteristic by type.</p>
       <ol class="steps">
         <li><strong>Select a scale.</strong> The default command and <code>--scale</code> stop scanning on the first recognized S200 with a connectable advertisement. The default discovery time is 30 seconds. <code>--seconds N</code> accepts 1–60.</li>
-        <li><strong>Open it by Bluetooth address.</strong> The shared library passes the public or random address type to WinRT when known and uses the address alone otherwise.</li>
-        <li><strong>Request an uncached service list.</strong> <code>GetGattServicesWithCacheModeAsync(Uncached)</code> contacts the device. The terminal checks the GATT status and prints the address and returned UUIDs after success.</li>
+        <li><strong>Get a Windows object for the scale.</strong> The shared library looks it up by Bluetooth address and supplies its address type (public or random) when known. The app uses that object to query the scale.</li>
+        <li><strong>Ask Windows to discover the scale’s services.</strong> Passing <code>Uncached</code> to <code>GetGattServicesWithCacheModeAsync</code> makes Windows query the scale directly. The terminal checks whether discovery succeeded before printing the results.</li>
       </ol>
-      <p class="source"><a href="../crates/cli/src/main.rs">Terminal commands</a> · <a href="../crates/scale/src/lib.rs">Windows Bluetooth connection</a></p>
+      <p class="source"><a href="../crates/cli/src/main.rs">Terminal commands</a> · <a href="../crates/scale/src/lib.rs">Windows Bluetooth connection</a> · <a href="https://learn.microsoft.com/en-us/windows/uwp/devices-sensors/gatt-client">Windows GATT client reference</a></p>
     </section>
 
     <section class="panel" aria-labelledby="match-heading">
@@ -190,7 +192,7 @@
             <text class="node-detail" x="140" y="73">Xiaomi Smart Scale S200</text>
             <rect class="node" x="20" y="112" width="240" height="64" rx="8"/>
             <text class="node-title" x="140" y="139">MiBeacon service data</text>
-            <text class="node-detail" x="140" y="159">FE95 with an S200 product ID</text>
+            <text class="node-detail" x="140" y="159">Xiaomi tag and S200 product ID</text>
 
             <path class="arrow" d="M260 50H281Q297 50 297 66V79 M260 144H281Q297 144 297 128V115"/>
             <circle class="node" cx="297" cy="97" r="18"/>
@@ -215,8 +217,8 @@
         <figcaption>Windows can deliver identification and connectability in separate packets. The app combines them when both use the same Bluetooth address.</figcaption>
       </figure>
       <ol class="steps">
-        <li><strong>Start an active WinRT advertisement watcher.</strong> When a broadcast bind key is available, the watcher also requests extended advertisements. Discard address zero and the stale or out-of-range RSSI value <code>−127</code>.</li>
-        <li><strong>Recognize an S200.</strong> Match a case-insensitive name prefix from the diagram or inspect 16-bit service data in AD type <code>0x16</code>. The first six data bytes are <code>95 fe | control LE16 | product LE16</code>. Accepted product IDs are <code>0x45C9</code>, <code>0x4C04</code>, and <code>0x4DCB</code>.</li>
+        <li><strong>Start an active WinRT advertisement watcher.</strong> When a broadcast bind key is available, the watcher also requests extended advertisements. Skip address zero (anonymous) and a received signal strength of <code>−127 dBm</code> (stale or out of range).</li>
+        <li><strong>Recognize an S200.</strong> Match a case-insensitive name prefix from the diagram or look for advertisement data type <code>0x16</code>, which carries service data with a 16-bit UUID. Read its first six bytes as <code>95 FE ∥ control LE16 ∥ product LE16</code>. The bytes <code>95 FE</code> identify Xiaomi service data because they encode <code>FE95</code> in little-endian order. The control word describes the frame, and the product ID identifies the scale variant. The app recognizes IDs <code>0x45C9</code>, <code>0x4C04</code>, and <code>0x4DCB</code> (ms113).</li>
         <li><strong>Determine connectability.</strong> Directed and undirected connectable advertisements qualify. An extended advertisement qualifies when Windows sets <code>IsConnectable</code>.</li>
         <li><strong>Merge by address.</strong> Keep the most recent signal and any new name, address type, setup info, or decoded weight. Recognition and connectability stay set for the lifetime of the candidate. Emit recognized candidates when those fields change. In continuous mode, also emit each freshly decoded weight and prune stale candidates every 30 seconds.</li>
       </ol>
@@ -257,7 +259,7 @@
             <path class="arrow" d="M536 54H595" marker-end="url(#weight-arrow)"/>
             <rect class="node-accent" x="600" y="22" width="220" height="64" rx="8"/>
             <text class="node-title node-inverse" x="710" y="49">Decode and display</text>
-            <text class="node-detail node-inverse" x="710" y="69">AES-CCM on FE95/001B</text>
+            <text class="node-detail node-inverse" x="710" y="69">Decrypt scale readings</text>
           </svg>
         </div>
         <figcaption>Use <code>cargo run -- --weight</code> for one settled reading. The desktop app repeats the cycle while it is running.</figcaption>
@@ -269,24 +271,24 @@
       </ol>
       <h3>Authenticate the Bluetooth session</h3>
       <ol class="steps">
-        <li>Find service <code>FE95</code> and subscribe to control <code>0010</code>, auth <code>0019</code>, and data <code>001B</code> using <a href="#transport-heading">the shared transport</a>.</li>
-        <li>Write <code>24 00 00 00</code> to control. Generate 16 random app bytes <code>A</code> and send them in auth block <code>0B</code>. Receive 16 scale bytes <code>S</code> in block <code>0D</code>.</li>
-        <li>Expand 64 bytes with HKDF-SHA256 using the login token as input, <code>A ∥ S</code> as salt, and ASCII <code>mible-login-info</code> as info. Use bytes <code>[0,16)</code> for the device key, <code>[16,32)</code> for the app key, and <code>[32,36)</code> for the device IV.</li>
-        <li>Verify auth block <code>0C</code> as <code>HMAC-SHA256(device key, S ∥ A)</code>. Send <code>HMAC-SHA256(app key, A ∥ S)</code> in block <code>0A</code>. The authentication waits allow eight seconds per stage.</li>
-        <li>Start accepting readings after control <code>21 00 00 00</code>. Control <code>23 00 00 00</code> rejects the token and <code>E0 00 00 00</code> reports an unregistered scale. A mismatched HMAC also ends login.</li>
+        <li><strong>Find the Xiaomi service (<code>FE95</code>).</strong> Ask Windows to query the scale directly, then subscribe to the <a href="#endpoints-heading">control, authentication, and weight characteristics</a> inside that service.</li>
+        <li><strong>Start login.</strong> Write the login command (<code>24 00 00 00</code>) to the control characteristic. Generate a fresh 16-byte app challenge <code>A</code> and send it in authentication block <code>0B</code>. Receive the scale’s own 16-byte challenge <code>S</code> in block <code>0D</code>.</li>
+        <li><strong>Derive session keys.</strong> Expand 64 bytes with HKDF-SHA256 using the login token as input, <code>A ∥ S</code> as salt, and ASCII <code>mible-login-info</code> as the protocol’s login context label. Use bytes <code>[0,16)</code> for the device key, <code>[16,32)</code> for the app key, and <code>[32,36)</code> for the device IV, which is used to build the weight packet nonce.</li>
+        <li><strong>Prove both sides derived the keys.</strong> Verify the scale’s proof (authentication block <code>0C</code>) as <code>HMAC-SHA256(device key, S ∥ A)</code>. Send the app’s proof, <code>HMAC-SHA256(app key, A ∥ S)</code>, in block <code>0A</code>. Each authentication wait allows eight seconds.</li>
+        <li><strong>Wait for the scale’s login result.</strong> The control characteristic reports login accepted (<code>21 00 00 00</code>), token rejected (<code>23 00 00 00</code>), or scale unregistered (<code>E0 00 00 00</code>). The app accepts readings only after login succeeds. A mismatched HMAC also ends login.</li>
       </ol>
       <h3>Authenticate and parse a data block</h3>
       <ol class="steps">
-        <li>Reassemble a framed notification on <code>001B</code>. Split its payload into <code>counter[2] ∥ ciphertext ∥ tag[4]</code>.</li>
+        <li>Reassemble a <a href="#transport-heading">framed message</a> from the weight characteristic (<code>001B</code>). Its payload contains a two-byte packet counter, the encrypted reading, and a four-byte authentication tag used to verify it.</li>
         <li>Open it with AES-128-CCM using the device key, no additional data, and nonce <code>device IV[4] ∥ zeros[4] ∥ counter[2] ∥ zeros[2]</code>. Discard packets that fail tag verification.</li>
         <li>Scan the plaintext for the fields below. A valid settled field takes priority over live fields. Convert hundredths of a kilogram to kilograms for display.</li>
       </ol>
       <div class="fields" role="region" aria-label="Connected weight field layout" tabindex="0">
         <table>
-          <thead><tr><th scope="col">Field prefix</th><th scope="col">Payload</th><th scope="col">Result</th></tr></thead>
+          <thead><tr><th scope="col">Reading</th><th scope="col">Field prefix</th><th scope="col">How to read the payload</th></tr></thead>
           <tbody>
-            <tr><th scope="row"><code>02 30</code></th><td>Two-byte little-endian weight, greater than zero and below 30,000. For example, <code>02 30 57 1C</code> yields 72.55 kg.</td><td>Live weight. Identical consecutive live values are suppressed.</td></tr>
-            <tr><th scope="row"><code>length A0</code></th><td><code>length</code> UTF-8 bytes with exactly five comma-separated unsigned integers. The third is weight in the same range and the fifth is a nonzero UTC value.</td><td>Settled weight. The app uses the weight field and the desktop timestamps its saved record with the PC clock.</td></tr>
+            <tr><th scope="row">Live weight</th><td><code>02 30</code><br><code>02</code> is the length and <code>30</code> is the live-reading field ID.</td><td>Read a two-byte little-endian weight, greater than zero and below 30,000 hundredths of a kilogram. The sample <code>02 30 57 1C</code> reads 72.55 kg. The app suppresses identical consecutive live values.</td></tr>
+            <tr><th scope="row">Settled weight</th><td><code>length A0</code><br><code>A0</code> is the settled-record field ID.</td><td>Read <code>length</code> UTF-8 bytes with exactly five comma-separated unsigned integers. The third is weight in the same range and the fifth is a nonzero UTC value. The desktop app timestamps its saved record with the PC clock.</td></tr>
           </tbody>
         </table>
       </div>
@@ -321,10 +323,10 @@
         </div>
       </figure>
       <ol class="steps">
-        <li>Use recognized <code>FE95</code> service data with MiBeacon version 4 or 5 and both the encrypted (<code>0x0008</code>) and object-present (<code>0x0040</code>) bits. The byte after the six-byte discovery header is the frame counter.</li>
-        <li>When <code>0x0010</code> is set, read six MAC bytes from the packet. Otherwise use the six low bytes of the Bluetooth address in little-endian order. When <code>0x0020</code> is set, consume the capability byte and one additional byte if its <code>0x20</code> bit is set.</li>
-        <li>Take the last four bytes as the tag and the preceding three as the extra counter. Open the remaining ciphertext with AES-128-CCM, the bind key, additional byte <code>11</code>, and nonce <code>MAC[6] ∥ product LE16 ∥ frame[1] ∥ extra counter[3]</code>.</li>
-        <li>Walk the authenticated plaintext as objects of form <code>type LE16 ∥ length[1] ∥ value[length]</code>. For object <code>0x4E16</code> with nine value bytes, decode bytes <code>[1,5)</code> as a little-endian unsigned weight in hundredths of a kilogram. Yield it if positive.</li>
+        <li><strong>Select encrypted Xiaomi broadcasts.</strong> Use Xiaomi service data (<code>FE95</code>) with MiBeacon version 4 or 5. The control word must say the payload is encrypted (mask <code>0x0008</code>) and contains objects to decode (mask <code>0x0040</code>). The byte after the six-byte discovery header is the frame counter.</li>
+        <li><strong>Read the address and skip optional fields.</strong> If the MAC-present flag (mask <code>0x0010</code>) is set, read the next six bytes as the scale’s MAC address. Otherwise use the six low bytes of the Bluetooth address in little-endian order. If the capability-present flag (mask <code>0x0020</code>) is set, consume the capability byte. Bit <code>0x20</code> in that byte means there is one more capability byte to skip before the ciphertext.</li>
+        <li><strong>Verify and decrypt the objects.</strong> Take the last four bytes as the authentication tag and the preceding three as the extra counter. Use AES-128-CCM with the bind key and nonce <code>MAC[6] ∥ product LE16 ∥ frame counter[1] ∥ extra counter[3]</code>. MiBeacon uses the fixed byte <code>11</code> as additional authenticated data, so the app includes it when verifying the tag.</li>
+        <li><strong>Extract the weight object.</strong> Each decrypted object has a type ID, a byte count, and a value (<code>type LE16 ∥ length[1] ∥ value[length]</code>). The S200 weight object has type <code>0x4E16</code> and a nine-byte value. Read the four bytes at offsets 1 through 4 as a little-endian unsigned weight in hundredths of a kilogram. Yield it if positive.</li>
       </ol>
       <p class="source"><a href="../crates/scale/src/weight.rs">MiBeacon decoder</a></p>
     </section>
@@ -412,62 +414,79 @@
             <text class="node-title" x="517" y="52">Obtain Xiaomi proof</text>
             <text class="node-detail" x="517" y="72">Device ID, signature, cert</text>
             <text class="node-title node-inverse" x="727" y="52">Send proof over BLE</text>
-            <text class="node-detail node-inverse" x="727" y="72">Require control reply 11</text>
+            <text class="node-detail node-inverse" x="727" y="72">Wait for scale confirmation</text>
           </svg>
         </div>
         <figcaption>The terminal prints <code>Scale setup complete</code> after the scale confirms registration.</figcaption>
       </figure>
       <h3>Find the scale and derive credentials</h3>
       <ol class="steps">
-        <li>Open one <a href="#cloud-heading">Xiaomi cloud session</a> and verify it with the read-only device-count request. Then scan for the first connectable scale with product <code>0x4DCB</code>, MiBeacon v5, Standard Auth mode, setup requested, and the registered bit clear.</li>
-        <li>Open <code>FE95</code>, subscribe to control <code>0010</code> and auth <code>0019</code>, and read the negotiated ATT MTU. Write <code>A2 00 00 00</code> to control. Require auth block <code>00</code> with device info <code>02 00 00 00</code>, the supported no-OOB setup profile.</li>
-        <li>Generate an ephemeral P-256 key pair and write <code>15 00 00 00</code> to control. Send the app’s 64-byte <code>X ∥ Y</code> public key as auth block <code>03</code> and wait for its acknowledgment. Receive the scale’s block <code>03</code>, require 64 bytes, prepend the SEC1 uncompressed prefix <code>04</code>, and validate the point.</li>
-        <li>Compute the P-256 ECDH shared secret. Expand 64 bytes with HKDF-SHA256, no explicit salt, and ASCII <code>mible-setup-info</code>. Use bytes <code>[0,12)</code> as the login token, <code>[12,28)</code> as the bind key, and <code>[28,44)</code> as the identity-encryption key.</li>
+        <li><strong>Choose a scale requesting setup.</strong> Open one <a href="#cloud-heading">Xiaomi cloud session</a> and verify it with the read-only device-count request. Scan for a connectable ms113 (product ID <code>0x4DCB</code>) whose MiBeacon v5 flags advertise Standard Auth, a setup request, and an unregistered state.</li>
+        <li><strong>Find the Xiaomi service (<code>FE95</code>).</strong> Ask Windows to query the scale directly. In the returned service, find and subscribe to the <a href="#endpoints-heading">control (<code>0010</code>) and authentication (<code>0019</code>) characteristics</a>. Read the negotiated packet size (ATT MTU) to calculate how much fits in a write.</li>
+        <li><strong>Check the scale’s setup capabilities.</strong> Send the device information request (<code>A2 00 00 00</code>) to the control characteristic. The app expects a device information reply in authentication block <code>00</code> with payload <code>02 00 00 00</code>. That payload identifies the supported profile with no out-of-band verification step.</li>
+        <li><strong>Send and receive public keys.</strong> Generate an ephemeral P-256 key pair and write the start key exchange command (<code>15 00 00 00</code>) to the control characteristic. Send the app’s 64-byte <code>X ∥ Y</code> public key in authentication block <code>03</code>, the public-key block. Wait for acknowledgment, then receive the scale’s key in the same block type. Require 64 bytes and prepend <code>04</code>, the SEC1 marker for uncompressed point coordinates, before validating the point.</li>
+        <li><strong>Derive the setup keys.</strong> Compute the P-256 ECDH shared secret. Expand 64 bytes with HKDF-SHA256, no explicit salt, and ASCII <code>mible-setup-info</code> as the protocol’s setup context label. Use bytes <code>[0,12)</code> as the login token, <code>[12,28)</code> as the bind key, and <code>[28,44)</code> as the identity-encryption key.</li>
       </ol>
       <h3>Obtain Xiaomi’s authorization</h3>
       <ol class="steps">
         <li>Send the Bluetooth address as <code>mac</code>, <code>model=xiaomi.scales.ms113</code>, and hex <code>token</code> to <code>/device/bltapplydid</code>. Accept the returned device ID from a string or the <code>did</code> property. It must contain 1–64 ASCII letters, digits, periods, hyphens, or underscores.</li>
         <li>Create and sync a new <code>s200-*.keys</code> file under <code>target/s200-registration</code> with the login token, bind key, and Bluetooth address. The app retains it when the later registration result is uncertain.</li>
         <li>Send <code>did</code> and the same <code>token</code> to <code>/v2/device/ble_standard_bind</code>. Set the <code>bind_key</code> property and <code>beacon_key</code> to the hex bind key. Send the <code>smac</code> property as an empty string.</li>
-        <li>Require <code>success=true</code>. Decode <code>cloud_cert</code> and <code>cloud_sign</code> as Base64 or Base64URL, with or without padding. The certificate must start with <code>30</code> and contain at most 4,096 bytes. Require a 64-byte signature and a nonzero unsigned 32-bit <code>utc</code>.</li>
+        <li>Require <code>success=true</code>. Decode the certificate (<code>cloud_cert</code>) and signature (<code>cloud_sign</code>) as Base64 or Base64URL, with or without padding. Check that the certificate is at most 4,096 bytes and starts with the DER SEQUENCE type byte (<code>30</code>). Require a 64-byte signature and a nonzero unsigned 32-bit timestamp (<code>utc</code>).</li>
       </ol>
       <h3>Send the proof and wait for the scale</h3>
       <ol class="steps">
         <li>Make an 88-byte plaintext. Take the last up to 20 bytes of the DID, right-align them in bytes <code>[0,20)</code>, and pad the left with zeroes. Append the 64-byte signature and the four-byte little-endian UTC.</li>
-        <li>Encrypt it with AES-128-CCM using the identity key. Use nonce <code>10 11 12 13 14 15 16 17 18 19 1A 1B</code>, ASCII <code>devID</code> as additional authenticated data, and append the four-byte tag.</li>
-        <li>Write <code>13 00 00 00</code> to control. Send the encrypted identity as auth block <code>00</code> and wait for its acknowledgment. Send the certificate bytes as block <code>07</code> with the certificate fragment limit below.</li>
+        <li>Encrypt it with AES-128-CCM using the identity key. For this message the protocol specifies the fixed nonce <code>10 11 12 13 14 15 16 17 18 19 1A 1B</code> and authenticates the ASCII label <code>devID</code> alongside the ciphertext. Append the four-byte authentication tag.</li>
+        <li><strong>Request registration confirmation.</strong> Write the confirmation command (<code>13 00 00 00</code>) to the control characteristic. Send the encrypted device identity in authentication block <code>00</code> and wait for its acknowledgment. Then send the certificate in authentication block <code>07</code> using the <a href="#certificate-fragment-limit">certificate fragment limit</a>.</li>
       </ol>
       <div class="fields" role="region" aria-label="Registration outcomes" tabindex="0">
         <table>
           <thead><tr><th scope="col">Scale response</th><th scope="col">Registration outcome</th></tr></thead>
           <tbody>
-            <tr><th scope="row">Control <code>11 00 00 00</code></th><td>Success. The CLI reports the scale’s address and completes setup.</td></tr>
-            <tr><th scope="row">Control <code>12 00 00 00</code> or <code>E1 00 00 00</code></th><td>The scale rejects registration or reports it is already registered.</td></tr>
+            <tr><th scope="row">Registration succeeded<br><code>11 00 00 00</code></th><td>The CLI reports the scale’s address and completes setup.</td></tr>
+            <tr><th scope="row">Registration failed<br><code>12 00 00 00</code></th><td>The scale rejected registration.</td></tr>
+            <tr><th scope="row">Already registered<br><code>E1 00 00 00</code></th><td>The scale reports an existing registration.</td></tr>
             <tr><th scope="row">Transfer acknowledgment only</th><td>Wait another five seconds for a control result. If none arrives, full registration reports an incomplete result and gives the saved keys path.</td></tr>
             <tr><th scope="row">Transfer failure or no reply</th><td>Report a transport error or timeout.</td></tr>
           </tbody>
         </table>
       </div>
-      <p class="source"><a href="../crates/scale/src/setup/registration.rs">Registration flow</a> · <a href="../crates/scale/src/setup/registration_crypto.rs">Key derivation and identity encryption</a> · <a href="../crates/scale/src/cloud_sign_in/registration_api.rs">Cloud registration requests</a></p>
+      <p class="source"><a href="../crates/scale/src/setup/registration.rs">Registration flow</a> · <a href="../crates/scale/src/setup/registration_crypto.rs">Key derivation and identity encryption</a> · <a href="../crates/scale/src/cloud_sign_in/registration_api.rs">Cloud registration requests</a> · <a href="https://www.rfc-editor.org/rfc/rfc5280.html#section-4.1">X.509 certificate structure</a></p>
     </section>
 
     <section class="panel" aria-labelledby="transport-heading">
       <h2 id="transport-heading">Standard Auth and weight packet framing</h2>
-      <p>The app resolves service <code>FE95</code> and its required characteristics with uncached queries. It registers a value-change handler and enables notifications or, if unavailable, indications. Writes use GATT Write Without Response.</p>
-      <p class="note">Packet literals are hexadecimal. <code>LE16</code> denotes a two-byte little-endian integer, and <code>∥</code> means concatenate bytes in the order shown.</p>
-      <div class="fields" role="region" aria-label="Standard Auth frame formats" tabindex="0">
+      <h3 id="endpoints-heading">Bluetooth service and endpoints</h3>
+      <p>The app asks Windows to query the scale directly for the Xiaomi GATT service (short UUID <code>FE95</code>). After Windows returns it, the app queries for the specific characteristics inside that service.</p>
+      <div class="fields" role="region" aria-label="Xiaomi GATT characteristics" tabindex="0">
         <table>
-          <caption>Frame bytes on auth <code>0019</code> and received data <code>001B</code></caption>
-          <thead><tr><th scope="col">Frame</th><th scope="col">Action</th></tr></thead>
+          <thead><tr><th scope="col">Endpoint and short UUID</th><th scope="col">What passes through it</th></tr></thead>
           <tbody>
-            <tr><th scope="row"><code>00 00 00 kind count LE16</code></th><td>Announce a fragmented block. Receiver validates incoming counts from 1 through 32 and writes <code>00 00 01 01</code> when ready.</td></tr>
-            <tr><th scope="row"><code>index LE16 ∥ fragment</code></th><td>Send after ready. Receiver requires ordered indexes from 1 to count and nonempty fragment bodies. It concatenates them and writes <code>00 00 01 00</code> on completion.</td></tr>
-            <tr><th scope="row"><code>00 00 02 kind ∥ payload</code></th><td>Receive a single-packet block and acknowledge with <code>00 00 03 00</code>.</td></tr>
-            <tr><th scope="row"><code>00 00 01 05</code></th><td>The scale reports transfer failure on the auth channel.</td></tr>
+            <tr><th scope="row">Control<br><code>0010</code></th><td>The app sends commands such as start login. The scale reports outcomes such as login accepted or registration failed.</td></tr>
+            <tr><th scope="row">Authentication<br><code>0019</code></th><td>The app and scale send challenges, proofs, public keys, the certificate, and acknowledgments for those transfers.</td></tr>
+            <tr><th scope="row">Weight data<br><code>001B</code></th><td>The scale sends encrypted measurement blocks. The app acknowledges their transfer on the same endpoint.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>Outgoing blocks are announced even when one fragment is enough. The fragment payload limit is <code>ATT MTU − 3 − 2</code>, allowing three bytes for ATT and two for the index. For certificate block <code>07</code> cap the MTU at 23, giving at most 18 payload bytes per fragment. Registration gives each receive or acknowledgment wait five seconds.</p>
+      <p>Subscribing lets the scale push updates to the app. The app prefers notifications and uses indications when notifications are unavailable. A GATT Write Without Response sends a write without asking for an ATT reply. The scale protocol exchanges its own acknowledgments for framed blocks.</p>
+      <h3>How a block is transferred</h3>
+      <p>A block is a message and may span several BLE writes. The <code>kind</code> byte identifies its contents, such as a public key or a certificate. The fragment count says how many pieces follow.</p>
+      <p class="note">Packet literals are hexadecimal. <code>LE16</code> denotes a two-byte little-endian integer, and <code>∥</code> means concatenate bytes in the order shown.</p>
+      <div class="fields" role="region" aria-label="Standard Auth frame formats" tabindex="0">
+        <table>
+          <caption>Frame formats used on the authentication and weight characteristics</caption>
+          <thead><tr><th scope="col">Meaning</th><th scope="col">Frame bytes</th><th scope="col">What happens next</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Fragmented block announced</th><td><code>00 00 00 kind count LE16</code></td><td>The app accepts incoming counts from 1 through 32. The receiver replies with Ready (<code>00 00 01 01</code>).</td></tr>
+            <tr><th scope="row">One fragment</th><td><code>index LE16 ∥ fragment</code></td><td>Send after Ready. The receiver requires nonempty pieces numbered from 1 to the announced count in order. After joining them, it replies with All fragments received (<code>00 00 01 00</code>).</td></tr>
+            <tr><th scope="row">Single-packet block</th><td><code>00 00 02 kind ∥ payload</code></td><td>The whole payload follows the kind byte. The receiver replies with Single packet received (<code>00 00 03 00</code>).</td></tr>
+            <tr><th scope="row">Transfer failed</th><td><code>00 00 01 05</code></td><td>The scale reports a failed block transfer on the authentication characteristic.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Outgoing blocks are announced even when one fragment is enough. The ATT MTU is the maximum size of an Attribute Protocol packet. Subtract three bytes for the ATT write header and two for the fragment index to get the bytes available for the payload.</p>
+      <p class="note" id="certificate-fragment-limit">For the certificate block (<code>07</code>), the app caps the size calculation at an ATT MTU of 23 because the ms113 rejected larger certificate fragments. That leaves up to 18 certificate bytes per fragment. Registration allows five seconds for each receive or acknowledgment wait.</p>
       <p class="source"><a href="../crates/scale/src/setup.rs">GATT lookup</a> · <a href="../crates/scale/src/setup/certificate_transfer.rs">Transport and subscriptions</a></p>
     </section>
 
@@ -476,7 +495,7 @@
       <h3>Get the smart-home session</h3>
       <ol class="steps">
         <li>GET <code>https://account.xiaomi.com/longPolling/loginUrl</code> with <code>sid=xiaomiio</code>, callback <code>https://sts.api.io.mi.com/sts</code>, and current epoch milliseconds in <code>_dc</code>. Require HTTP 200, strip the optional <code>&amp;&amp;&amp;START&amp;&amp;&amp;</code> prefix, and parse <code>loginUrl</code>, <code>lp</code>, and <code>timeout</code>. Both returned URLs must use HTTPS on port 443 and belong to <code>account.xiaomi.com</code>, <code>account.mi.com</code>, or their subdomains.</li>
-        <li>Print the one-time <code>loginUrl</code> for the user’s browser and poll <code>lp</code> until the server lifetime expires, capped at five minutes. An HTTP 200 is the authorization reply. HTTP 202, 204, 408, 504, and request timeouts retry after up to 400 ms.</li>
+        <li>Print the one-time <code>loginUrl</code> for the user’s browser and poll <code>lp</code> until the server lifetime expires, capped at five minutes. HTTP 200 (OK) contains the authorization reply. The app polls again after up to 400 ms on HTTP 202 (Accepted), 204 (No Content), 408 (Request Timeout), 504 (Gateway Timeout), or a client request timeout.</li>
         <li>Read nonempty <code>ssecurity</code>, decimal <code>userId</code> when present, and <code>location</code>. Require the HTTPS callback host <code>sts.api.io.mi.com</code> and path <code>/sts</code>. GET the callback and require its nonempty <code>serviceToken</code> cookie from a 2xx or 3xx reply. The HTTP client sends requests without following redirects. The CLI holds the session in memory for the command.</li>
       </ol>
       <h3>Sign and send an API request</h3>
@@ -484,7 +503,7 @@
         <li>Build a 12-byte nonce from eight cryptographically random bytes and four big-endian bytes for Unix epoch minutes. Compute <code>key = SHA256(Base64Decode(ssecurity) ∥ nonce)</code> and <code>signedNonce = Base64(key)</code>.</li>
         <li>Use the first formula below on the raw JSON. Encrypt both the JSON and that hash separately using RC4 with the raw key and the first 1,024 stream bytes discarded. Base64-encode both ciphertexts as <code>data</code> and <code>rc4_hash__</code>.</li>
         <li>Calculate the final signature using the encrypted fields. POST the URL-encoded form below to <code>https://de.api.io.mi.com/app</code> plus the request path. Require an account ID for these requests.</li>
-        <li>Require HTTP 200 and parse Xiaomi’s JSON. If the response body is encrypted, Base64-decode and apply RC4 with the same key and stream discard before parsing. A reply passes when <code>code=0</code> and <code>result</code> is present.</li>
+        <li>Require HTTP 200 (OK) and parse Xiaomi’s JSON. If the response body is encrypted, Base64-decode and apply RC4 with the same key and stream discard before parsing. Inside the JSON, Xiaomi’s status <code>code=0</code> means success. The app also requires a <code>result</code> field.</li>
       </ol>
       <div class="formula">
         <code>first hash = Base64(SHA1("POST&amp;" ∥ path ∥ "&amp;data=" ∥ raw JSON ∥ "&amp;" ∥ signedNonce))</code>
@@ -522,7 +541,7 @@
           <tbody>
             <tr><th scope="row">Bluetooth S200 discovery</th><td>Prefer a connectable scale and then one with setup info. For equal ranks use the latest reported candidate. Stop early when it has both. If discovery fails, skip readiness and Standard Auth GATT.</td></tr>
             <tr><th scope="row">S200 registration readiness</th><td>Require the <a href="#registration-heading">unregistered ms113 setup profile</a> in the advertisement.</td></tr>
-            <tr><th scope="row">Standard Auth over Bluetooth</th><td>Require a connectable advertisement and uncached lookup of <code>FE95/0019</code>. Run this even if readiness failed.</td></tr>
+            <tr><th scope="row">Standard Auth over Bluetooth</th><td>Require a connectable advertisement and ask Windows to find the Xiaomi service (<code>FE95</code>) and its authentication characteristic (<code>0019</code>) on the scale. Run this even if readiness failed.</td></tr>
             <tr><th scope="row">Xiaomi browser sign-in</th><td>Get the smart-home session even if Bluetooth failed. If sign-in fails, skip the Europe API check.</td></tr>
             <tr><th scope="row">Xiaomi Europe API</th><td>Reuse the same session to send the signed device-count request.</td></tr>
           </tbody>
@@ -537,7 +556,7 @@
       <ol class="steps">
         <li>Find an eligible unregistered ms113 and read the local DER file. Use the same device-info check, ephemeral P-256 public keys, and HKDF as the cloud-backed flow.</li>
         <li>Create the ASCII identity <code>test-</code> followed by the first seven bytes of the app public key as 14 lowercase hex digits. Prefix one zero byte and encrypt it using the same identity key, nonce, and additional data. Save candidate credentials under <code>target/s200-setup-test</code>.</li>
-        <li>Send the encrypted identity and local certificate using blocks <code>00</code> and <code>07</code>. The scale’s control response determines registration. The test also exits successfully if the scale acknowledges delivery and gives no registration result.</li>
+        <li>Send the encrypted identity in authentication block <code>00</code> and the local certificate in block <code>07</code>. The scale’s control response determines registration. The test also exits successfully if the scale acknowledges delivery and gives no registration result.</li>
       </ol>
       <h3>Check the account separately</h3>
       <div class="quick-start">
