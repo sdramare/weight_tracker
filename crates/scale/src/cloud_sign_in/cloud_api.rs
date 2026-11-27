@@ -2,10 +2,9 @@ use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64ct::{Base64, Encoding};
-use rand_core::{OsRng, RngCore};
 use reqwest::header::{ACCEPT_ENCODING, COOKIE, HeaderMap, HeaderValue};
 use sha1::{Digest as _, Sha1};
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 use url::form_urlencoded;
 use windows::Data::Json::{JsonObject, JsonValue};
 use windows::Win32::Foundation::NTSTATUS;
@@ -153,8 +152,7 @@ fn request_nonce() -> io::Result<[u8; 12]> {
     let minutes = u32::try_from(time.as_secs() / 60)
         .map_err(|_| io::Error::other("the PC clock is outside Xiaomi's nonce range"))?;
     let mut nonce = [0; 12];
-    OsRng
-        .try_fill_bytes(&mut nonce[..8])
+    getrandom::fill(&mut nonce[..8])
         .map_err(|_| io::Error::other("could not generate a Xiaomi request nonce"))?;
     nonce[8..].copy_from_slice(&minutes.to_be_bytes());
     Ok(nonce)

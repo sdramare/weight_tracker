@@ -4,16 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-aes = "0.8.4"
+aes = "0.9.4"
 base64ct = { version = "1.8.3", features = ["alloc"] }
-ccm = { version = "0.5.0", default-features = false }
-hkdf = "0.12.4"
-hmac = "0.12.1"
-p256 = { version = "0.13.2", default-features = false, features = ["ecdh", "std"] }
-rand_core = { version = "0.6.4", features = ["getrandom"] }
+ccm = { version = "0.6.1", default-features = false }
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
+hkdf = "0.13.0"
+hmac = "0.13.0"
+p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "std"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "cookies", "http2", "native-tls", "system-proxy"] }
 sha1 = { version = "0.11.0", default-features = false }
-sha2 = "0.10.9"
+sha2 = "0.11.2"
 url = "2.5.9"
 windows = { version = "0.62.2", features = [
     "Data_Json",

@@ -64,7 +64,7 @@ impl SetupDialog {
 
     /// Returns whether the dialog should close.
     pub(super) fn show(&mut self, context: &egui::Context) -> bool {
-        let modal = egui::Modal::new(egui::Id::new("s200-scale-setup")).show(context, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("s200-scale-setup")).show(context, |ui| {
             ui.set_width(380.0);
             ui.heading("Set up scale");
             ui.add_space(8.0);
@@ -178,7 +178,7 @@ mod tests {
 
         let context = egui::Context::default();
         let render = |dialog: &mut SetupDialog, events: Vec<Event>| {
-            context.run(
+            let mut output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -187,10 +187,12 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |context| {
-                    dialog.show(context);
+                |ui| {
+                    dialog.show(ui.ctx());
                 },
-            )
+            );
+            output.textures_delta.clear();
+            output
         };
         let button_position = |output: &egui::FullOutput, label: &str| {
             output

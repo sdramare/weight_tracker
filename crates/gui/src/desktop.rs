@@ -559,11 +559,14 @@ impl RegistrationObserver for DesktopRegistration<'_, '_> {
 }
 
 impl eframe::App for ScaleApp {
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, _context: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_events();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(24))
-            .show(context, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Weight monitor").size(28.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -613,7 +616,7 @@ impl eframe::App for ScaleApp {
                     });
             });
         if let Some(dialog) = &mut self.setup_dialog
-            && dialog.show(context)
+            && dialog.show(ui.ctx())
         {
             self.setup_dialog = None;
         }

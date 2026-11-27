@@ -279,13 +279,16 @@ fn import_file(
     modified: SystemTime,
     state: CredentialState,
 ) -> io::Result<()> {
-    let digest = Sha256::digest(contents.as_bytes());
+    let digest: String = Sha256::digest(contents.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let suffix = match state {
         CredentialState::Legacy => ".keys",
         CredentialState::Pending => PENDING_SUFFIX,
         CredentialState::Confirmed => CONFIRMED_SUFFIX,
     };
-    let path = directory.join(format!("s200-import-{digest:x}{suffix}"));
+    let path = directory.join(format!("s200-import-{digest}{suffix}"));
     match write_new_credentials(&path, contents, Some(modified)) {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             if fs::read_to_string(&path)? == contents {

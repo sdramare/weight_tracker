@@ -264,7 +264,7 @@ pub(super) fn register_with(
         )
     })?;
 
-    let exchange = RegistrationKeys::generate();
+    let exchange = RegistrationKeys::generate()?;
     write_packet(control, &START_KEY_EXCHANGE)?;
     transmit_block(
         auth,

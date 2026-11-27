@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
 use eframe::egui::{self, Color32};
-use egui_plot::{GridInput, GridMark, Legend, Line, LineStyle, Plot, PlotPoints, Points};
+use egui_plot::{
+    GridInput, GridMark, HoverPosition, Legend, Line, LineStyle, Plot, PlotPoints, Points,
+};
 
 use super::history::WeightEntry;
 
@@ -76,12 +78,20 @@ pub(super) fn show(ui: &mut egui::Ui, entries: &[WeightEntry], grouping: &mut Gr
             };
             date_label(tick.value, format)
         })
-        .label_formatter(|name, point| {
-            format!(
+        .label_formatter(|hover| {
+            let (name, point) = match hover {
+                HoverPosition::NearDataPoint {
+                    plot_name,
+                    position,
+                    ..
+                } => (*plot_name, position),
+                HoverPosition::Elsewhere { position } => ("", position),
+            };
+            Some(format!(
                 "{name}\n{}\n{:.2} kg",
                 date_label(point.x, "%d %b %Y"),
                 point.y
-            )
+            ))
         })
         .show(ui, |plot| {
             let name = grouping.series_name();
@@ -221,7 +231,7 @@ mod tests {
         };
         for mut grouping in [GroupBy::Day, GroupBy::Week, GroupBy::Month] {
             let context = egui::Context::default();
-            let output = context.run(
+            let mut output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -229,12 +239,13 @@ mod tests {
                     )),
                     ..Default::default()
                 },
-                |context| {
-                    egui::CentralPanel::default().show(context, |ui| {
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         show(ui, &[entry], &mut grouping);
                     });
                 },
             );
+            output.textures_delta.clear();
             let labels = output.shapes.iter().filter(
                 |shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "26 Nov"),
             );

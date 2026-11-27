@@ -6,12 +6,11 @@ use std::time::{Duration, Instant};
 use aes::Aes128;
 use ccm::Ccm;
 use ccm::aead::{
-    AeadInPlace, KeyInit,
+    AeadInOut, KeyInit,
     consts::{U4, U12},
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic;
 use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothLEDevice};
@@ -213,8 +212,7 @@ fn login(
         accepted: false,
     };
     let mut app_random = [0; 16];
-    OsRng
-        .try_fill_bytes(&mut app_random)
+    getrandom::fill(&mut app_random)
         .map_err(|_| io::Error::other("could not generate the Bluetooth login challenge"))?;
     write_packet(control, &LOGIN)?;
     replies.send_block(auth, mtu, APP_RANDOM, &app_random, "app challenge")?;
@@ -397,7 +395,7 @@ impl LoginKeys {
 }
 
 fn login_mac(key: &[u8; 16]) -> io::Result<HmacSha256> {
-    <HmacSha256 as Mac>::new_from_slice(key)
+    <HmacSha256 as hmac::KeyInit>::new_from_slice(key)
         .map_err(|_| io::Error::other("could not initialize the S200 login authenticator"))
 }
 
@@ -409,7 +407,12 @@ fn decode_weight(cipher: &WeightCipher, iv: [u8; 4], bytes: &[u8]) -> Option<Wei
     nonce[8..10].copy_from_slice(counter);
     let mut plaintext = ciphertext.to_vec();
     cipher
-        .decrypt_in_place_detached((&nonce).into(), &[], &mut plaintext, tag.into())
+        .decrypt_inout_detached(
+            (&nonce).into(),
+            &[],
+            plaintext.as_mut_slice().into(),
+            tag.into(),
+        )
         .ok()?;
     parse_weight(&plaintext)
 }

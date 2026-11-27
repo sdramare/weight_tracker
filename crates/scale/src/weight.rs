@@ -5,7 +5,7 @@ use std::str::FromStr;
 use aes::Aes128;
 use ccm::Ccm;
 use ccm::aead::{
-    AeadInPlace, KeyInit,
+    AeadInOut, KeyInit,
     consts::{U4, U12},
 };
 
@@ -123,7 +123,12 @@ impl WeightDecoder {
         ];
         let mut plaintext = ciphertext.to_vec();
         self.0
-            .decrypt_in_place_detached((&nonce).into(), &[0x11], &mut plaintext, tag.into())
+            .decrypt_inout_detached(
+                (&nonce).into(),
+                &[0x11],
+                plaintext.as_mut_slice().into(),
+                tag.into(),
+            )
             .ok()?;
         weight_object(&plaintext)
     }

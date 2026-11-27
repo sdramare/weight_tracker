@@ -6,7 +6,7 @@ A Rust workspace for the Xiaomi Smart Scale S200 on Windows. The desktop app reg
 
 - A Windows 10 or 11 PC with Bluetooth Low Energy support
 - A Xiaomi Smart Scale S200
-- Rust and Cargo, with the Clippy component for checked builds
+- Rust 1.95 or later and Cargo, with the Clippy component for checked builds
 
 ## Run
 

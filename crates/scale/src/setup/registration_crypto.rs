@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 
 use aes::Aes128;
 use ccm::Ccm;
-use ccm::aead::{AeadInPlace, KeyInit};
+use ccm::aead::{AeadInOut, KeyInit};
 use ccm::consts::{U4, U12};
+use getrandom::SysRng;
 use hkdf::Hkdf;
 use p256::PublicKey;
 use p256::ecdh::EphemeralSecret;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
-use rand_core::OsRng;
+use p256::elliptic_curve::{Generate, sec1::ToSec1Point};
 use sha2::Sha256;
 
 use crate::BluetoothAddress;
@@ -32,12 +32,13 @@ pub(super) struct Registration {
 }
 
 impl RegistrationKeys {
-    pub(super) fn generate() -> Self {
-        let secret = EphemeralSecret::random(&mut OsRng);
-        let encoded = secret.public_key().to_encoded_point(false);
+    pub(super) fn generate() -> io::Result<Self> {
+        let secret = EphemeralSecret::try_generate_from_rng(&mut SysRng)
+            .map_err(|_| io::Error::other("could not generate the Bluetooth setup key"))?;
+        let encoded = secret.public_key().to_sec1_point(false);
         let mut public_key = [0; 64];
         public_key.copy_from_slice(&encoded.as_bytes()[1..]);
-        Self { secret, public_key }
+        Ok(Self { secret, public_key })
     }
 
     pub(super) fn public_key(&self) -> &[u8; 64] {
@@ -91,7 +92,11 @@ impl Registration {
         let cipher = DeviceIdCipher::new_from_slice(&self.keys[28..44])
             .map_err(|_| io::Error::other("could not initialize the setup cipher"))?;
         let tag = cipher
-            .encrypt_in_place_detached(&DEVICE_ID_NONCE.into(), b"devID", &mut plain)
+            .encrypt_inout_detached(
+                &DEVICE_ID_NONCE.into(),
+                b"devID",
+                plain.as_mut_slice().into(),
+            )
             .map_err(|_| io::Error::other("could not encrypt the registration identity"))?;
         plain.extend_from_slice(&tag);
         Ok(plain)
@@ -175,8 +180,8 @@ mod tests {
 
     #[test]
     fn derives_the_same_keys_on_both_ends() {
-        let app = RegistrationKeys::generate();
-        let scale = RegistrationKeys::generate();
+        let app = RegistrationKeys::generate().unwrap();
+        let scale = RegistrationKeys::generate().unwrap();
         let app_public = *app.public_key();
         let scale_public = *scale.public_key();
         let app = app.finish(&scale_public).unwrap();
@@ -196,8 +201,8 @@ mod tests {
 
     #[test]
     fn retains_local_trial_keys_until_the_scale_confirms_its_addressed_registration() {
-        let app = RegistrationKeys::generate();
-        let scale = RegistrationKeys::generate();
+        let app = RegistrationKeys::generate().unwrap();
+        let scale = RegistrationKeys::generate().unwrap();
         let registration = app.finish(scale.public_key()).unwrap();
         let id = SystemTime::now()
             .duration_since(UNIX_EPOCH)

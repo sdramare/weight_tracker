@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::io;
+use std::sync::Arc;
 
 use eframe::{CreationContext, egui};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -56,7 +57,7 @@ pub(super) fn create(
     }
 
     let context = creation.egui_ctx.clone();
-    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+    MenuEvent::set_event_handler(Some(Arc::new(move |event: MenuEvent| {
         if event.id == show_id {
             show_window(&context, window_handle);
         } else if event.id == quit_id {
@@ -66,7 +67,7 @@ pub(super) fn create(
                 context.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-    }));
+    })));
     let context = creation.egui_ctx.clone();
     let tray_id = tray.id().clone();
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
