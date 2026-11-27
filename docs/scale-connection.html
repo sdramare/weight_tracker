@@ -406,7 +406,7 @@
         <div class="diagram" role="region" aria-label="Scrollable scale registration diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="registration-title registration-description">
             <title id="registration-title">Scale registration in one run</title>
-            <desc id="registration-description">The app signs in through Xiaomi and scans for a connectable unregistered S200 ms113. It checks the scale's setup capabilities and derives setup keys with P-256 ECDH and HKDF-SHA256, obtains a signed identity and certificate from the Europe API, and sends them over Bluetooth for the scale to confirm.</desc>
+            <desc id="registration-description">The app signs in through Xiaomi and scans for a connectable unregistered S200 ms113. It checks the scale's setup capabilities, reads any stored Xiaomi device ID, and derives setup keys with P-256 ECDH and HKDF-SHA256. It obtains a signed identity and certificate from the Europe API for the stored ID or an ID allocated by Xiaomi, then sends them over Bluetooth for the scale to confirm.</desc>
             <defs>
               <marker id="registration-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
@@ -424,7 +424,7 @@
             <text class="node-title" x="312" y="52">Derive setup keys</text>
             <text class="node-detail" x="312" y="72">P-256 ECDH and HKDF</text>
             <text class="node-title" x="517" y="52">Obtain Xiaomi proof</text>
-            <text class="node-detail" x="517" y="72">Device ID, signature, cert</text>
+            <text class="node-detail" x="517" y="72">Authorize the scale’s ID</text>
             <text class="node-title node-inverse" x="727" y="52">Send proof over BLE</text>
             <text class="node-detail node-inverse" x="727" y="72">Wait for scale confirmation</text>
           </svg>
@@ -435,13 +435,13 @@
       <ol class="steps">
         <li><strong>Find an unregistered scale.</strong> Open one <a href="#cloud-heading">Xiaomi cloud session</a> and verify it with the read-only device-count request. Scan for a connectable ms113 (product ID <code>0x4DCB</code>) whose MiBeacon v5 flags advertise Standard Auth and an unregistered state. Starting setup manually accepts both values of the solicitation flag. A scale can appear in the list as soon as its name or product ID arrives, while setup waits for both the registration flags and a connectable advertisement.</li>
         <li><strong>Find the Xiaomi service (<code>FE95</code>).</strong> Ask Windows to query the scale directly. In the returned service, find and subscribe to the <a href="#endpoints-heading">control (<code>0010</code>) and authentication (<code>0019</code>) characteristics</a>. Read the negotiated packet size (ATT MTU) to calculate how much fits in a write.</li>
-        <li><strong>Check the scale’s setup capabilities.</strong> Send the device information request (<code>A2 00 00 00</code>) to the control characteristic and reassemble the reply in authentication block <code>00</code>. The app accepts the two observed reply sizes, 4 and 24 bytes, when the first four bytes are <code>02 00 00 00</code>. That header identifies the supported profile with no out-of-band verification step. The longer reply carries 20 additional bytes that this flow does not use.</li>
+        <li><strong>Check the scale’s setup capabilities.</strong> Send the device information request (<code>A2 00 00 00</code>) to the control characteristic and reassemble the reply in authentication block <code>00</code>. The app accepts the two observed reply sizes, 4 and 24 bytes, when the first four bytes are <code>02 00 00 00</code>. That header identifies the supported profile with no out-of-band verification step. In the 24-byte reply, read the last 20 bytes as the stored Xiaomi device ID, with leading zero bytes as padding. An all-zero field means the scale has no stored ID.</li>
         <li><strong>Send and receive public keys.</strong> Generate an ephemeral P-256 key pair and write the start key exchange command (<code>15 00 00 00</code>) to the control characteristic. Send the app’s 64-byte <code>X ∥ Y</code> public key in authentication block <code>03</code>, the public-key block. Wait for acknowledgment, then receive the scale’s key in the same block type. Require 64 bytes and prepend <code>04</code>, the SEC1 marker for uncompressed point coordinates, before validating the point.</li>
         <li><strong>Derive the setup keys.</strong> Compute the P-256 ECDH shared secret. Expand 64 bytes with HKDF-SHA256, no explicit salt, and ASCII <code>mible-setup-info</code> as the protocol’s setup context label. Use bytes <code>[0,12)</code> as the login token, <code>[12,28)</code> as the bind key, and <code>[28,44)</code> as the identity-encryption key.</li>
       </ol>
       <h3>Obtain Xiaomi’s authorization</h3>
       <ol class="steps">
-        <li>Send the Bluetooth address as <code>mac</code>, <code>model=xiaomi.scales.ms113</code>, and hex <code>token</code> to <code>/device/bltapplydid</code>. Accept the returned device ID from a string or the <code>did</code> property. It must contain 1–64 ASCII letters, digits, periods, hyphens, or underscores.</li>
+        <li>Use the device ID from the scale’s setup reply when present. For a scale without a stored ID, send the Bluetooth address as <code>mac</code>, <code>model=xiaomi.scales.ms113</code>, and hex <code>token</code> to <code>/device/bltapplydid</code>. Accept the returned device ID from a string or the <code>did</code> property. Valid IDs contain ASCII letters, digits, periods, hyphens, or underscores. The API can return up to 64 characters.</li>
         <li>Send <code>did</code> and the same <code>token</code> to <code>/v2/device/ble_standard_bind</code>. Set the <code>bind_key</code> property and <code>beacon_key</code> to the hex bind key. Send the <code>smac</code> property as an empty string.</li>
         <li>Require <code>success=true</code>. Decode the certificate (<code>cloud_cert</code>) and signature (<code>cloud_sign</code>) as Base64 or Base64URL, with or without padding. Check that the certificate is at most 4,096 bytes and starts with the DER SEQUENCE type byte (<code>30</code>). Require a 64-byte signature and a nonzero unsigned 32-bit timestamp (<code>utc</code>).</li>
       </ol>
@@ -457,7 +457,7 @@
           <thead><tr><th scope="col">Scale response</th><th scope="col">Registration outcome</th></tr></thead>
           <tbody>
             <tr><th scope="row">Registration succeeded<br><code>11 00 00 00</code></th><td>Rename the file to <code>.confirmed.keys</code>. The CLI prints the scale’s address and the confirmed file path.</td></tr>
-            <tr><th scope="row">Registration failed<br><code>12 00 00 00</code></th><td>The scale rejected registration. Rename to <code>.rejected.keys</code> so readers skip this attempt.</td></tr>
+            <tr><th scope="row">Registration failed<br><code>12 00 00 00</code></th><td>The scale rejected the authorization without a reason. Rename to <code>.rejected.keys</code> so readers skip this attempt. Check the advertised pairing state before deciding whether to reset.</td></tr>
             <tr><th scope="row">Already registered<br><code>E1 00 00 00</code></th><td>The scale reports an existing registration. Mark the new attempt <code>.rejected.keys</code> and keep any previously saved registration.</td></tr>
             <tr><th scope="row">Transfer acknowledgment only</th><td>Wait another five seconds for a control result. If none arrives, full registration reports an incomplete result and gives the saved keys path.</td></tr>
             <tr><th scope="row">Transfer failure or no reply</th><td>Report a transport error or timeout.</td></tr>
@@ -594,6 +594,7 @@
         <p><strong>Setup scan saw an unpaired scale without a connection offer</strong>Close any app connected to the scale, then wake it again while setup scans.</p>
         <p><strong>Setup scan still saw an existing pairing</strong>If you intend to clear the pairing and the measurements stored on the scale, hold Reset under the battery cover for seven seconds. Wait for all LEDs to light and the display to return to zero, then retry setup. <a href="https://www.mi.com/my/support/faq/details/KA-517701/">Xiaomi’s reset instructions</a></p>
         <p><strong>Unexpected Bluetooth setup reply</strong>The app connected to the scale and received a device-information reply it could not use. The error shows the scale’s address and the observed profile. Run <code>--setup-profile</code> to repeat just that Bluetooth check.</p>
+        <p><strong>Scale rejected authorization (0x12)</strong>Run <code>--setup-info</code> to check the advertised pairing state. If the scale reports that it is unregistered, retry setup without resetting. An unregistered scale can still report the Xiaomi device ID from an earlier pairing.</p>
         <p><strong>Scale unreachable</strong>Close Xiaomi Home if it is connected, then wake the scale again.</p>
         <p><strong>Bluetooth unavailable</strong>Turn Bluetooth on. The desktop app retries automatically.</p>
         <p><strong>Login token rejected</strong>Check the saved registration file for the scale’s address and run <code>--weight</code> again. Restart the desktop app after replacing its saved credentials.</p>

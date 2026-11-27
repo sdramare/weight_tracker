@@ -24,15 +24,27 @@ impl CloudDeviceId {
             .or_else(|_| result.GetObject()?.GetNamedString(&HSTRING::from("did")))
             .map_err(|_| invalid_reply("Xiaomi did not return a BLE device ID"))?
             .to_string_lossy();
-        if value.is_empty()
-            || value.len() > 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        {
-            return Err(invalid_reply("Xiaomi returned an invalid BLE device ID"));
+        Self::parse(&value).ok_or_else(|| invalid_reply("Xiaomi returned an invalid BLE device ID"))
+    }
+
+    pub(crate) fn from_scale_field(field: &[u8]) -> io::Result<Option<Self>> {
+        let invalid_id = || invalid_reply("The scale reported an invalid stored Xiaomi device ID.");
+        let value = std::str::from_utf8(field)
+            .map_err(|_| invalid_id())?
+            .trim_start_matches('\0');
+        if value.is_empty() {
+            return Ok(None);
         }
-        Ok(Self(value))
+        Self::parse(value).map(Some).ok_or_else(invalid_id)
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        (!value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
+        .then(|| Self(value.to_owned()))
     }
 }
 

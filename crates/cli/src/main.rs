@@ -331,7 +331,9 @@ fn show_setup_profile(duration: std::time::Duration) -> std::io::Result<()> {
     if profile.supports_registration() {
         println!("This profile supports the app's registration flow.");
     } else {
-        println!("Registration expects a 4- or 24-byte reply starting with 02 00 00 00.");
+        println!(
+            "Registration expects a 4- or 24-byte reply starting with 02 00 00 00 and a valid device ID when one is included."
+        );
     }
     Ok(())
 }

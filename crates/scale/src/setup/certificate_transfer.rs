@@ -18,6 +18,7 @@ use super::{
     Apartment, Scale, check_service_status, open_scale_device, registration_status,
     setup_characteristic, setup_service,
 };
+use crate::cloud_sign_in::CloudDeviceId;
 use crate::login_keys::{CONFIRMED_SUFFIX, PENDING_SUFFIX, REJECTED_SUFFIX};
 
 const TEST_CERTIFICATE_PATH: &str = "crates/scale/src/setup/s200-local-test.der";
@@ -64,9 +65,22 @@ pub struct SetupProfile(Vec<u8>);
 impl SetupProfile {
     /// Checks for the no-OOB profile in either observed ms113 reply format.
     pub fn supports_registration(&self) -> bool {
+        self.stored_device_id().is_ok()
+    }
+
+    fn stored_device_id(&self) -> io::Result<Option<CloudDeviceId>> {
         let length = self.0.len();
-        (length == NO_OOB_PROFILE_HEADER.len() || length == EXTENDED_DEVICE_INFO_LENGTH)
-            && self.0.starts_with(&NO_OOB_PROFILE_HEADER)
+        if (length == NO_OOB_PROFILE_HEADER.len() || length == EXTENDED_DEVICE_INFO_LENGTH)
+            && let Some(field) = self.0.strip_prefix(&NO_OOB_PROFILE_HEADER)
+        {
+            return CloudDeviceId::from_scale_field(field);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "Bluetooth setup expected a 4- or 24-byte reply starting with 02 00 00 00. Received {self}."
+            ),
+        ))
     }
 }
 
@@ -106,7 +120,7 @@ pub fn send_setup_test_certificate(
             format!("could not read local test certificate at {TEST_CERTIFICATE_PATH}: {error}"),
         )
     })?;
-    let (reply, credentials) = register_with(scale, |registration| {
+    let (reply, credentials) = register_with(scale, |registration, _stored_device_id| {
         let encrypted_id = registration.encrypted_device_id()?;
         let credentials =
             registration.save_trial_credentials(credentials_directory, scale.address())?;
@@ -203,7 +217,7 @@ impl SetupLink {
 
 pub(super) fn register_with<T>(
     scale: &Scale,
-    authorize: impl FnOnce(&Registration) -> io::Result<(RegistrationProof, T)>,
+    authorize: impl FnOnce(&Registration, Option<CloudDeviceId>) -> io::Result<(RegistrationProof, T)>,
 ) -> io::Result<(SetupCertificateReply, T)> {
     registration_status(scale)
         .map_err(|blocker| io::Error::new(io::ErrorKind::InvalidInput, blocker.message()))?;
@@ -216,16 +230,12 @@ pub(super) fn register_with<T>(
         ..
     } = &link;
     let mtu = service.Session()?.MaxPduSize()?;
-    let profile = link.read_profile()?;
-    if !profile.supports_registration() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "Connected to S200 {}. Bluetooth setup expected a 4- or 24-byte reply starting with 02 00 00 00. Received {profile}.",
-                scale.address()
-            ),
-        ));
-    }
+    let stored_device_id = link.read_profile()?.stored_device_id().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("Connected to S200 {}. {error}", scale.address()),
+        )
+    })?;
 
     let exchange = RegistrationKeys::generate();
     write_packet(control, &START_KEY_EXCHANGE)?;
@@ -240,7 +250,7 @@ pub(super) fn register_with<T>(
     require_ack(replies, FRAGMENTS_RECEIVED, "app public key")?;
     let peer = receive_block(auth, replies, PUBLIC_KEY_BLOCK, "scale public key")?;
     let registration = exchange.finish(&peer)?;
-    let (proof, state) = authorize(&registration)?;
+    let (proof, state) = authorize(&registration, stored_device_id)?;
 
     write_packet(control, &CONFIRM_REGISTRATION)?;
     transmit_block(
@@ -563,17 +573,35 @@ mod tests {
 
     #[test]
     fn accepts_both_observed_device_info_formats_with_the_supported_header() {
-        assert!(SetupProfile(vec![2, 0, 0, 0]).supports_registration());
-
-        let mut extended = vec![2, 0, 0, 0];
-        extended.extend_from_slice(&[0xff; 20]);
+        assert!(
+            SetupProfile(vec![2, 0, 0, 0])
+                .stored_device_id()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SetupProfile([&[2, 0, 0, 0][..], &[0; 20]].concat())
+                .stored_device_id()
+                .unwrap()
+                .is_none()
+        );
+        let mut extended = b"\x02\0\0\0\0blt.4.example000000".to_vec();
         assert!(SetupProfile(extended.clone()).supports_registration());
+        assert_eq!(
+            SetupProfile(extended.clone())
+                .stored_device_id()
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "blt.4.example000000"
+        );
         assert_eq!(
             SetupProfile(extended.clone()).to_string(),
             "02 00 00 00 … (24 bytes total)"
         );
         extended[0] = 3;
         assert!(!SetupProfile(extended).supports_registration());
+        assert!(!SetupProfile([&[2, 0, 0, 0][..], &[0xff; 20]].concat()).supports_registration());
         assert!(!SetupProfile(vec![2, 0, 0, 1]).supports_registration());
         assert!(!SetupProfile(vec![2, 0, 0, 0, 0]).supports_registration());
     }

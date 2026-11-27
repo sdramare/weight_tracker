@@ -17,6 +17,7 @@ pub enum RegistrationStep {
     EuropeApi,
     ScaleDiscovery,
     BluetoothKeyExchange,
+    ReuseDeviceId,
     AllocateDeviceId,
     RequestCertificate,
     FinishSetup,
@@ -29,6 +30,7 @@ impl fmt::Display for RegistrationStep {
             Self::EuropeApi => "Xiaomi Europe API",
             Self::ScaleDiscovery => "Find the S200 over Bluetooth",
             Self::BluetoothKeyExchange => "Standard Auth Bluetooth key exchange",
+            Self::ReuseDeviceId => "Use the Xiaomi device ID reported by the scale",
             Self::AllocateDeviceId => "Allocate the Xiaomi BLE device ID",
             Self::RequestCertificate => "Request Xiaomi's signed Bluetooth authorization",
             Self::FinishSetup => "Send the Xiaomi certificate and wait for the scale to confirm",
@@ -92,7 +94,7 @@ pub fn register_scale_europe_while(
     use RegistrationEvent::{CredentialsSaved, Passed, Started};
     use RegistrationStep::{
         AllocateDeviceId, BluetoothKeyExchange, BrowserSignIn, EuropeApi, FinishSetup,
-        RequestCertificate, ScaleDiscovery,
+        RequestCertificate, ReuseDeviceId, ScaleDiscovery,
     };
 
     let session = run_step(&mut report, BrowserSignIn, || {
@@ -107,13 +109,18 @@ pub fn register_scale_europe_while(
 
     report(Started(BluetoothKeyExchange));
     check_cancellation(&keep_going)?;
-    let (reply, credentials) = register_with(&scale, |registration| {
+    let (reply, credentials) = register_with(&scale, |registration, stored_device_id| {
         check_cancellation(&keep_going)?;
         report(Passed(BluetoothKeyExchange));
         let token = registration.login_token_hex();
         let bind_key = registration.bind_key_hex();
-        let device_id = run_step(&mut report, AllocateDeviceId, || {
-            session.allocate_device_id(address, &token)
+        let id_step = if stored_device_id.is_some() {
+            ReuseDeviceId
+        } else {
+            AllocateDeviceId
+        };
+        let device_id = run_step(&mut report, id_step, || {
+            stored_device_id.map_or_else(|| session.allocate_device_id(address, &token), Ok)
         })?;
         let authorization = run_step(&mut report, RequestCertificate, || {
             session.authorize_standard_registration(&device_id, &token, &bind_key)
@@ -132,11 +139,25 @@ pub fn register_scale_europe_while(
     })?;
 
     let credentials = finish_credentials(credentials, reply)?;
-    if reply != SetupCertificateReply::RegistrationSucceeded {
-        return Err(io::Error::other(format!(
-            "{reply}. Candidate keys are saved in {}",
-            credentials.display()
-        )));
+    match reply {
+        SetupCertificateReply::RegistrationSucceeded => {}
+        SetupCertificateReply::RegistrationFailed => {
+            return Err(io::Error::other(
+                "Xiaomi issued the setup authorization, but the scale rejected it (Bluetooth code 0x12). The scale gave no reason. The app marked this attempt’s keys as rejected.",
+            ));
+        }
+        SetupCertificateReply::AlreadyRegistered => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "The scale reports it is already paired (Bluetooth code 0xE1). Use its existing setup, or factory-reset it if you intend to pair it again.",
+            ));
+        }
+        SetupCertificateReply::ReceivedWithoutRegistrationResult => {
+            return Err(io::Error::other(format!(
+                "The scale acknowledged the certificate transfer but did not confirm pairing. Candidate keys are saved in {}.",
+                credentials.display()
+            )));
+        }
     }
     report(Passed(FinishSetup));
     Ok(RegisteredScale {
