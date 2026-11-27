@@ -220,10 +220,10 @@
         <figcaption>Windows can deliver identification and connectability in separate packets. The app combines them when both use the same Bluetooth address.</figcaption>
       </figure>
       <ol class="steps">
-        <li><strong>Start an active WinRT advertisement watcher.</strong> Request both legacy and extended advertisements, including during setup before a bind key exists. Skip address zero (anonymous) and a received signal strength of <code>−127 dBm</code> (stale or out of range).</li>
+        <li><strong>Start a WinRT advertisement watcher.</strong> The desktop monitors passively, so its watcher sends no scan requests. Setup and timed CLI scans use active scanning to collect scan responses. Both modes listen for legacy and extended advertisements. Skip address zero (anonymous) and a received signal strength of <code>−127 dBm</code> (stale or out of range).</li>
         <li><strong>Recognize an S200.</strong> Match a case-insensitive name prefix from the diagram or read the MiBeacon header. Advertisement data type <code>0x16</code> carries 16-bit service data. Its Xiaomi header starts with <code>95 FE</code>, the little-endian encoding of the <code>FE95</code> service UUID, followed by the 16-bit control word and product ID in little-endian order. If the service header is missing, check manufacturer data for Xiaomi’s company ID (<code>0x038F</code>), where the same control and product fields start at the first byte. The app recognizes product IDs <code>0x45C9</code>, <code>0x4C04</code>, and <code>0x4DCB</code> (ms113).</li>
         <li><strong>Determine connectability.</strong> Directed and undirected connectable advertisements qualify. An extended advertisement qualifies when Windows sets <code>IsConnectable</code>.</li>
-        <li><strong>Merge by address.</strong> Keep the most recent signal and any new name, address type, setup info, or decoded weight. Recognition and connectability stay set for the lifetime of the candidate. Emit recognized candidates when those fields change. In continuous mode, also emit each freshly decoded weight and prune stale candidates every 30 seconds.</li>
+        <li><strong>Merge by address.</strong> Keep the most recent signal and any new name, address type, setup info, or decoded weight. Recognition and connectability stay set for the lifetime of the candidate. Emit recognized candidates when those fields change. In continuous mode, also report each current connection offer and freshly decoded weight, and prune stale candidates every 30 seconds.</li>
       </ol>
       <div class="fields" role="region" aria-label="MiBeacon setup flags" tabindex="0">
         <table>
@@ -237,7 +237,7 @@
           </tbody>
         </table>
       </div>
-      <p class="source"><a href="../crates/scale/src/discovery.rs">Advertisement watcher</a> · <a href="../crates/scale/src/setup.rs">Setup flag decoding</a></p>
+      <p class="source"><a href="../crates/scale/src/discovery.rs">Advertisement watcher</a> · <a href="../crates/scale/src/setup.rs">Setup flag decoding</a> · <a href="https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.advertisement.bluetoothlescanningmode">Windows scanning modes</a></p>
     </section>
 
     <section class="panel" aria-labelledby="weight-heading">
@@ -246,7 +246,7 @@
         <div class="diagram" role="region" aria-label="Scrollable weight reading diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="weight-title weight-description">
             <title id="weight-title">Authenticated weight reading</title>
-            <desc id="weight-description">Step on the registered S200 ms113. The app connects as soon as it receives a connectable Bluetooth advertisement, authenticates with the saved login token, and shows live and settled weight. The desktop app resumes listening when the scale sleeps.</desc>
+            <desc id="weight-description">Step on the registered S200 ms113. The app connects when the scale offers a connection, authenticates with the saved login token, and shows live and settled weight. After a connection attempt the desktop listens passively for five seconds without a connection offer from that scale, then connects on a fresh offer.</desc>
             <defs>
               <marker id="weight-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
@@ -254,7 +254,7 @@
             </defs>
             <rect class="node" x="20" y="22" width="220" height="64" rx="8"/>
             <text class="node-title" x="130" y="49">Step on the scale</text>
-            <text class="node-detail" x="130" y="69">The app is already listening</text>
+            <text class="node-detail" x="130" y="69">Scale offers a connection</text>
             <path class="arrow" d="M240 54H299" marker-end="url(#weight-arrow)"/>
             <rect class="node" x="304" y="22" width="232" height="64" rx="8"/>
             <text class="node-title" x="420" y="49">Authenticate over GATT</text>
@@ -265,7 +265,7 @@
             <text class="node-detail node-inverse" x="710" y="69">Decrypt scale readings</text>
           </svg>
         </div>
-        <figcaption>Use <code>cargo run -p blt_unlock -- --weight</code> for one settled reading. The desktop app repeats the cycle while it is running.</figcaption>
+        <figcaption>Use <code>cargo run -p blt_unlock -- --weight</code> for one settled reading. The desktop app listens for a fresh connection offer after each weigh-in.</figcaption>
       </figure>
       <h3>Choose the saved token</h3>
       <ol class="steps">
@@ -365,9 +365,10 @@
       </figure>
       <h3>Watch and recover</h3>
       <ol class="steps">
-        <li>Start a background worker, try to open SQLite and load rows in timestamp order, and scan continuously. The worker handles advertisements as they arrive and waits up to one second to check for cancellation when the scan is idle.</li>
-        <li>List discovered scales by address. Save eligible broadcast readings as they arrive. On a connectable scale with a saved token, stop the watcher and open a connected weight session.</li>
-        <li>Show live and settled values as the worker reports them. On disconnect or inactivity, restart scanning and keep the last settled weight visible. After a scan or connection error, display the error and retry after two seconds.</li>
+        <li>Start a background worker, try to open SQLite and load rows in timestamp order, and listen passively. The worker handles advertisements as they arrive and waits up to one second to check for cancellation when the scan is idle.</li>
+        <li>List discovered scales by address and save eligible broadcast readings as they arrive. A current connection offer from a scale with a saved token can start a connected session. The worker stops the watcher while the connection is open and shows live and settled readings.</li>
+        <li>After each connection attempt, wait for five seconds of passive scanning without a connection offer from that address. Repeated offers restart its quiet interval. The first offer after the interval can start a new session. Timing restarts when the passive watcher resumes, so time spent connected, in setup, or waiting to retry cannot count as quiet.</li>
+        <li>On disconnect or inactivity, resume the passive watcher and keep the last settled weight visible. After a scan or connection error, display the error and restart listening after two seconds.</li>
         <li>On Windows <code>WM_SIZE</code> with <code>SIZE_MINIMIZED</code>, queue a hide request. When it runs, hide only if the window is still minimized and visible. The worker continues listening. Double-click the tray icon to restore the window, or right-click it for <strong>Show weight window</strong> and <strong>Quit</strong>. Closing the window also stops monitoring. If the tray cannot start, Windows minimizes the window normally and the app reports a tray error.</li>
       </ol>
       <h3>Store one record per interval</h3>
@@ -596,7 +597,7 @@
         <table>
           <thead><tr><th scope="col">Trait</th><th scope="col">Methods to follow</th><th scope="col">Implementations</th></tr></thead>
           <tbody>
-            <tr><th scope="row"><a href="../crates/scale/src/discovery.rs"><code>ScaleScanObserver</code></a></th><td><code>should_scan</code> controls the scan loop. <code>scale_discovered</code> receives the merged device state and any weight from the current advertisement.</td><td><code>DesktopScaleScan</code>, <code>TerminalWeightScan</code>, <code>TerminalSetupInfo</code></td></tr>
+            <tr><th scope="row"><a href="../crates/scale/src/discovery.rs"><code>ScaleScanObserver</code></a></th><td><code>should_scan</code> controls the loop. <code>scale_discovered</code> receives merged state and broadcast weights. <code>connection_offered</code> receives current connection offers during passive monitoring.</td><td><code>DesktopScaleScan</code>, <code>TerminalWeightScan</code>, <code>TerminalSetupInfo</code></td></tr>
             <tr><th scope="row"><a href="../crates/scale/src/setup/connected_weight.rs"><code>WeightSessionObserver</code></a></th><td><code>should_read_weight</code> controls the continuous wait. <code>on_weight_event</code> receives the login and reading events.</td><td><code>DesktopWeightSession</code>, <code>TerminalWeightDisplay</code></td></tr>
             <tr><th scope="row"><a href="../crates/scale/src/cloud_sign_in.rs"><code>ScaleSetupInteraction</code></a></th><td><code>present_xiaomi_sign_in</code> shows the browser link. <code>setup_cancelled</code> lets the desktop stop sign-in or setup discovery.</td><td><code>DesktopRegistration</code> and the terminal sign-in and setup types</td></tr>
             <tr><th scope="row"><a href="../crates/scale/src/setup/registration.rs"><code>RegistrationObserver</code></a></th><td><code>report_registration</code> receives progress through Bluetooth, Xiaomi authorization, and the scale’s confirmation.</td><td><code>DesktopRegistration</code>, <code>TerminalRegistration</code></td></tr>
@@ -618,6 +619,7 @@
         <p><strong>Scale rejected authorization (0x12)</strong>Run <code>--setup-info</code> to check the advertised pairing state. If the scale reports that it is unregistered, retry setup without resetting. An unregistered scale can still report the Xiaomi device ID from an earlier pairing.</p>
         <p><strong>Xiaomi rejected the authorization request</strong>The app shows the Europe API error code and any short reason supplied by Xiaomi. A factory reset affects the scale’s local state. Xiaomi manages the cloud record separately. <a href="https://www.mi.com/global/support/faq/details/KA-517672/">Xiaomi’s guide to cloud unbinding</a></p>
         <p><strong>Scale unreachable</strong>Close Xiaomi Home if it is connected, then wake the scale again.</p>
+        <p><strong>Second reading starts too soon</strong>Let the scale go to sleep before stepping on again. The desktop waits for a quiet interval before it will reconnect to the same scale.</p>
         <p><strong>Bluetooth unavailable</strong>Turn Bluetooth on. The desktop app retries automatically.</p>
         <p><strong>Login token rejected</strong>Check the saved registration file for the scale’s address and run <code>--weight</code> again. Restart the desktop app after replacing its saved credentials.</p>
         <p><strong>Certificate delivered</strong>Check the reported control response. Delivery by itself only proves that the Bluetooth transfer completed.</p>

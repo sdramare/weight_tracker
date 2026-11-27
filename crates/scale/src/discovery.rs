@@ -29,6 +29,12 @@ pub trait ScaleScanObserver {
         broadcast_weight: Option<Weight>,
     ) -> ControlFlow<()>;
 
+    /// In a continuous scan, receives each advertisement that offers a connection.
+    /// The timestamp is captured when Windows delivers the packet.
+    fn connection_offered(&mut self, _scale: &Scale, _received_at: Instant) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+
     /// Checked before waiting for the next advertisement.
     fn should_scan(&mut self) -> bool {
         true
@@ -37,6 +43,7 @@ pub trait ScaleScanObserver {
 
 struct Advertisement {
     address: BluetoothAddress,
+    received_at: Instant,
     is_s200: bool,
     name: Option<String>,
     signal_strength: SignalStrength,
@@ -58,6 +65,13 @@ enum ScanWindow {
 }
 
 impl ScanWindow {
+    fn scanning_mode(&self) -> BluetoothLEScanningMode {
+        match self {
+            Self::Timed(_) => BluetoothLEScanningMode::Active,
+            Self::Continuous => BluetoothLEScanningMode::Passive,
+        }
+    }
+
     fn next_wait(&self) -> Option<Duration> {
         match self {
             Self::Timed(deadline) => deadline
@@ -80,15 +94,17 @@ struct Watcher {
 }
 
 impl Watcher {
-    fn start(sender: Sender<Event>, decoder: Option<WeightDecoder>) -> io::Result<Self> {
+    fn start(
+        sender: Sender<Event>,
+        decoder: Option<WeightDecoder>,
+        mode: BluetoothLEScanningMode,
+    ) -> io::Result<Self> {
         let mut watcher = Self {
             inner: BluetoothLEAdvertisementWatcher::new()?,
             received: None,
             stopped: None,
         };
-        watcher
-            .inner
-            .SetScanningMode(BluetoothLEScanningMode::Active)?;
+        watcher.inner.SetScanningMode(mode)?;
         // Setup and ordinary discovery need these packets even without a weight key.
         let _ = watcher.inner.SetAllowExtendedAdvertisements(true);
 
@@ -162,7 +178,7 @@ fn run_scan(
     observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
     let (sender, receiver) = mpsc::channel();
-    let watcher = Watcher::start(sender, decoder)?;
+    let watcher = Watcher::start(sender, decoder, window.scanning_mode())?;
     let result = wait_for_scales(window, receiver, observer);
     result.and(watcher.stop())
 }
@@ -188,6 +204,8 @@ fn wait_for_scales(
         match receiver.recv_timeout(remaining) {
             Ok(Event::Advertisement(advertisement)) => {
                 let received_weight = advertisement.weight;
+                let received_at = advertisement.received_at;
+                let offers_connection = advertisement.connectable;
                 // Identification and connectability can be reported in separate packets.
                 let candidate =
                     candidates
@@ -213,6 +231,15 @@ fn wait_for_scales(
                 if (changed || fresh_weight)
                     && observer
                         .scale_discovered(&candidate.scale, received_weight)
+                        .is_break()
+                {
+                    break;
+                }
+                if matches!(window, ScanWindow::Continuous)
+                    && candidate.is_s200
+                    && offers_connection
+                    && observer
+                        .connection_offered(&candidate.scale, received_at)
                         .is_break()
                 {
                     break;
@@ -279,6 +306,7 @@ fn read_advertisement(
     args: &BluetoothLEAdvertisementReceivedEventArgs,
     decoder: Option<&WeightDecoder>,
 ) -> windows::core::Result<Option<Advertisement>> {
+    let received_at = Instant::now();
     let address = args.BluetoothAddress()?;
     let signal_dbm = args.RawSignalStrengthInDBm()?;
     // Skip anonymous advertisements and out-of-range notices containing stale data.
@@ -322,6 +350,7 @@ fn read_advertisement(
 
     Ok(Some(Advertisement {
         address,
+        received_at,
         is_s200: name_matches || setup_info.is_some(),
         name,
         signal_strength: SignalStrength(signal_dbm),
@@ -398,10 +427,68 @@ fn inspect_service_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        Advertisement, BluetoothAddress, BluetoothAddressType, ControlFlow, Duration, Event,
-        Instant, Scale, ScaleScanObserver, ScanWindow, SignalStrength, Weight, mpsc,
-        wait_for_scales,
+        Advertisement, BluetoothAddress, BluetoothAddressType, BluetoothLEScanningMode,
+        ControlFlow, Duration, Event, Instant, Scale, ScaleScanObserver, ScanWindow,
+        SignalStrength, Weight, mpsc, wait_for_scales,
     };
+
+    #[test]
+    fn only_timed_discovery_requests_scan_responses() {
+        assert_eq!(
+            ScanWindow::Continuous.scanning_mode(),
+            BluetoothLEScanningMode::Passive
+        );
+        assert_eq!(
+            ScanWindow::Timed(Instant::now()).scanning_mode(),
+            BluetoothLEScanningMode::Active
+        );
+    }
+
+    #[test]
+    fn continuous_scan_reports_repeated_connection_offers_from_current_packets() {
+        #[derive(Default)]
+        struct ConnectionOffers(Vec<Instant>);
+
+        impl ScaleScanObserver for ConnectionOffers {
+            fn scale_discovered(&mut self, _: &Scale, _: Option<Weight>) -> ControlFlow<()> {
+                ControlFlow::Continue(())
+            }
+
+            fn connection_offered(&mut self, _: &Scale, received_at: Instant) -> ControlFlow<()> {
+                self.0.push(received_at);
+                if self.0.len() == 3 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            }
+        }
+
+        let start = Instant::now();
+        let (sender, receiver) = mpsc::channel();
+        for (seconds, connectable) in [(0, true), (1, true), (2, false), (3, true)] {
+            sender
+                .send(Event::Advertisement(Advertisement {
+                    address: BluetoothAddress(12),
+                    received_at: start + Duration::from_secs(seconds),
+                    is_s200: true,
+                    name: None,
+                    signal_strength: SignalStrength(-60),
+                    connectable,
+                    address_type: None,
+                    weight: None,
+                    setup_info: None,
+                }))
+                .unwrap();
+        }
+        drop(sender);
+        let mut offers = ConnectionOffers::default();
+        wait_for_scales(ScanWindow::Continuous, receiver, &mut offers).unwrap();
+        assert_eq!(
+            offers.0,
+            [0, 1, 3].map(|seconds| start + Duration::from_secs(seconds))
+        );
+    }
 
     #[test]
     fn continuous_scan_stays_active_through_idle_wait_and_honors_cancellation() {
@@ -442,6 +529,7 @@ mod tests {
             sender
                 .send(Event::Advertisement(Advertisement {
                     address: BluetoothAddress(address),
+                    received_at: Instant::now(),
                     is_s200,
                     name: is_s200.then(|| format!("Xiaomi Scale S200 {address}")),
                     signal_strength: SignalStrength(-60),

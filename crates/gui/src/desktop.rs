@@ -20,6 +20,7 @@ use super::scale_setup::{SetupDialog, SetupRequest, SetupUpdate};
 use super::{tray, weight_plot};
 
 const RETRY_DELAY: Duration = Duration::from_secs(2);
+const RECONNECT_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const HISTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const SETUP_SCAN_TIME: Duration = Duration::from_secs(30);
 const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 243);
@@ -272,6 +273,7 @@ fn monitor_scales(
         next_history_refresh: Instant::now(),
         history_error: None,
         pending_setup: None,
+        reconnect_guards: BTreeMap::new(),
     }
     .run();
 }
@@ -285,6 +287,7 @@ struct ScaleMonitor<'a> {
     next_history_refresh: Instant,
     history_error: Option<String>,
     pending_setup: Option<SetupRequest>,
+    reconnect_guards: BTreeMap<BluetoothAddress, ReconnectGuard>,
 }
 
 impl ScaleMonitor<'_> {
@@ -346,6 +349,10 @@ impl ScaleMonitor<'_> {
         logins: &SavedScaleLogins,
         bind_key: Option<&ScaleBindKey>,
     ) -> io::Result<()> {
+        let scan_started_at = Instant::now();
+        for guard in self.reconnect_guards.values_mut() {
+            guard.scan_resumed(scan_started_at);
+        }
         let mut scan = DesktopScaleScan {
             monitor: self,
             logins,
@@ -359,6 +366,12 @@ impl ScaleMonitor<'_> {
                 .post(MonitorEvent::Status(MonitorStatus::Connecting))
                 .is_continue()
         {
+            self.reconnect_guards.insert(
+                scale.address(),
+                ReconnectGuard {
+                    last_offer: Instant::now(),
+                },
+            );
             let mut session = DesktopWeightSession {
                 monitor: self,
                 address: scale.address(),
@@ -432,6 +445,24 @@ impl ScaleMonitor<'_> {
     }
 }
 
+struct ReconnectGuard {
+    last_offer: Instant,
+}
+
+impl ReconnectGuard {
+    fn scan_resumed(&mut self, now: Instant) {
+        // Time spent connected, waiting to retry, or setting up gives no evidence of radio silence.
+        self.last_offer = now;
+    }
+
+    fn connection_offered(&mut self, received_at: Instant) -> bool {
+        let quiet =
+            received_at.saturating_duration_since(self.last_offer) >= RECONNECT_QUIET_PERIOD;
+        self.last_offer = self.last_offer.max(received_at);
+        quiet
+    }
+}
+
 struct DesktopScaleScan<'a, 'worker> {
     monitor: &'a mut ScaleMonitor<'worker>,
     logins: &'a SavedScaleLogins,
@@ -452,7 +483,18 @@ impl ScaleScanObserver for DesktopScaleScan<'_, '_> {
         if let Some(weight) = broadcast_weight {
             self.monitor.record_weight(weight)?;
         }
-        if scale.is_connectable() && self.logins.token_for(scale).is_some() {
+        ControlFlow::Continue(())
+    }
+
+    fn connection_offered(&mut self, scale: &Scale, received_at: Instant) -> ControlFlow<()> {
+        let address = scale.address();
+        if let Some(guard) = self.monitor.reconnect_guards.get_mut(&address) {
+            if !guard.connection_offered(received_at) {
+                return ControlFlow::Continue(());
+            }
+            self.monitor.reconnect_guards.remove(&address);
+        }
+        if self.logins.token_for(scale).is_some() {
             self.target = Some(scale.clone());
             return ControlFlow::Break(());
         }
@@ -620,4 +662,32 @@ fn scale_row(ui: &mut egui::Ui, row: &ScaleRow) {
                 });
             });
         });
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{RECONNECT_QUIET_PERIOD, ReconnectGuard};
+
+    #[test]
+    fn repeated_offers_do_not_reconnect_until_the_scale_goes_quiet() {
+        let start = Instant::now();
+        let mut guard = ReconnectGuard { last_offer: start };
+        for seconds in 1..=30 {
+            assert!(!guard.connection_offered(start + Duration::from_secs(seconds)));
+        }
+        let last_offer = start + Duration::from_secs(30);
+        assert!(guard.connection_offered(last_offer + RECONNECT_QUIET_PERIOD));
+    }
+
+    #[test]
+    fn an_unobserved_gap_during_a_connection_or_retry_does_not_rearm_the_scale() {
+        let start = Instant::now();
+        let mut guard = ReconnectGuard { last_offer: start };
+        let resumed_at = start + Duration::from_secs(30);
+        guard.scan_resumed(resumed_at);
+        assert!(!guard.connection_offered(resumed_at));
+        assert!(guard.connection_offered(resumed_at + RECONNECT_QUIET_PERIOD));
+    }
 }

@@ -104,7 +104,7 @@ pub fn discover_scales_with_weight(
     discovery::discover(duration, Some(WeightDecoder::new(key)), observer)
 }
 
-/// Watches for scales until stopped by the caller. An optional bind key enables
+/// Passively watches for scales until stopped by the caller. An optional bind key enables
 /// authenticated MiBeacon weight readings from the current advertisement.
 pub fn watch_scales(
     key: Option<&ScaleBindKey>,

@@ -16,7 +16,7 @@ From the repository root, run this in PowerShell to open the desktop app.
 cargo run -p blt_unlock_gui
 ```
 
-The desktop app keeps listening while it is running and lists the scales it discovers. Step on the S200 to start a reading. The app connects as soon as the registered scale advertises and resumes listening automatically when it sleeps. Minimize the window to keep monitoring in the system tray. Double-click the tray icon to restore the window, or right-click it for **Show weight window** and **Quit**. Closing the window also stops monitoring.
+The desktop app listens passively while it is running and lists the scales it discovers. Step on the S200 to start a reading. The app connects when the scale offers a connection. After each attempt, it waits for five seconds without a connection offer from that scale before trying again on a fresh offer. Minimize the window to keep monitoring in the system tray. Double-click the tray icon to restore the window, or right-click it for **Show weight window** and **Quit**. Closing the window also stops monitoring.
 
 Run the CLI with the default discovery timeout or set a longer one.
 
