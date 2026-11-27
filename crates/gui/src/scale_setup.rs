@@ -83,7 +83,7 @@ impl SetupDialog {
                             ui.label("Setup canceled.");
                         }
                         Err(error) => {
-                            ui.label("Setup didn’t complete.");
+                            ui.strong("Couldn’t set up the scale");
                             ui.label(error.to_string());
                         }
                     }
@@ -140,7 +140,7 @@ impl SetupAttempt {
             Some(RegistrationStep::BrowserSignIn) => "Requesting a Xiaomi sign-in link…",
             Some(RegistrationStep::EuropeApi) => "Checking your Xiaomi session…",
             Some(RegistrationStep::ScaleDiscovery) => {
-                "Step on the unregistered S200 you want to set up. Scanning for up to 30 seconds."
+                "Xiaomi sign-in is complete. Step on the S200 now to wake it. Keep it near this PC during the 30-second Bluetooth scan."
             }
             Some(RegistrationStep::BluetoothKeyExchange) => {
                 "Connecting to the scale over Bluetooth…"

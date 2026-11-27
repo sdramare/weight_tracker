@@ -27,7 +27,7 @@ impl fmt::Display for RegistrationStep {
         formatter.write_str(match self {
             Self::BrowserSignIn => "Xiaomi browser sign-in",
             Self::EuropeApi => "Xiaomi Europe API",
-            Self::ScaleDiscovery => "Find an unregistered S200 ms113",
+            Self::ScaleDiscovery => "Find the S200 over Bluetooth",
             Self::BluetoothKeyExchange => "Standard Auth Bluetooth key exchange",
             Self::AllocateDeviceId => "Allocate the Xiaomi BLE device ID",
             Self::RequestCertificate => "Request Xiaomi's signed Bluetooth authorization",
@@ -100,9 +100,9 @@ pub fn register_scale_europe_while(
     })?;
     check_cancellation(&keep_going)?;
     run_step(&mut report, EuropeApi, || session.verify_device_count())?;
-    let scale = run_step(&mut report, ScaleDiscovery, || {
-        find_registration_scale_while(scan_time, &keep_going)
-    })?;
+    report(Started(ScaleDiscovery));
+    let scale = find_registration_scale_while(scan_time, &keep_going)?;
+    report(Passed(ScaleDiscovery));
     let address = scale.address();
 
     report(Started(BluetoothKeyExchange));

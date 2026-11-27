@@ -17,6 +17,7 @@ use super::{BluetoothAddress, Scale, ScaleSetupInfo, SignalStrength, Weight, Wei
 
 const STOP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const CANDIDATE_LIFETIME: Duration = Duration::from_secs(30);
+const XIAOMI_COMPANY_ID: u16 = 0x038f;
 
 struct Advertisement {
     address: BluetoothAddress,
@@ -77,9 +78,8 @@ impl Watcher {
         watcher
             .inner
             .SetScanningMode(BluetoothLEScanningMode::Active)?;
-        if decoder.is_some() {
-            let _ = watcher.inner.SetAllowExtendedAdvertisements(true);
-        }
+        // Setup and ordinary discovery need these packets even without a weight key.
+        let _ = watcher.inner.SetAllowExtendedAdvertisements(true);
 
         type ReceivedHandler = TypedEventHandler<
             BluetoothLEAdvertisementWatcher,
@@ -291,7 +291,10 @@ fn read_advertisement(
     });
     let (setup_info, weight) = payload
         .as_ref()
-        .map(|payload| inspect_service_data(payload, address, decoder))
+        .map(|payload| {
+            let (info, weight) = inspect_service_data(payload, address, decoder);
+            (info.or_else(|| inspect_manufacturer_data(payload)), weight)
+        })
         .unwrap_or_default();
     let connectable = match args.AdvertisementType() {
         Ok(
@@ -318,6 +321,28 @@ fn read_advertisement(
         weight,
         setup_info,
     }))
+}
+
+fn inspect_manufacturer_data(payload: &BluetoothLEAdvertisement) -> Option<ScaleSetupInfo> {
+    // Xiaomi also sends MiBeacon without the FE95 prefix under its company ID.
+    let sections = payload
+        .GetManufacturerDataByCompanyId(XIAOMI_COMPANY_ID)
+        .ok()?;
+    for section in sections {
+        let Ok(reader) = section
+            .Data()
+            .and_then(|buffer| DataReader::FromBuffer(&buffer))
+        else {
+            continue;
+        };
+        let mut header = [0; 4];
+        if reader.ReadBytes(&mut header).is_ok()
+            && let Some(info) = ScaleSetupInfo::from_mibeacon_frame(&header)
+        {
+            return Some(info);
+        }
+    }
+    None
 }
 
 fn inspect_service_data(

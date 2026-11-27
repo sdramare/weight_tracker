@@ -21,8 +21,8 @@ The desktop app keeps listening while it is running and lists the scales it disc
 Run the CLI with the default discovery timeout or set a longer one.
 
 ```powershell
-cargo run
-cargo run -- --seconds 45
+cargo run -p blt_unlock
+cargo run -p blt_unlock -- --seconds 45
 ```
 
 The second command extends the default 30-second discovery timeout. If the CLI sees the scale but cannot connect, close Xiaomi Home if it is connected to the scale, then wake the scale again.
@@ -33,7 +33,7 @@ For an S200 ms113 registered by this program, open the desktop app or run the te
 
 ```powershell
 cargo run -p blt_unlock_gui
-cargo run -- --weight
+cargo run -p blt_unlock -- --weight
 ```
 
 Step on the scale and hold still. The desktop app shows live weight in kilograms as it arrives and keeps the last settled reading visible between weigh-ins. The terminal reader exits after one settled reading and uses an authenticated broadcast if discovery already supplied one. Both readers load saved Bluetooth tokens from `%LOCALAPPDATA%\blt_unlock\s200-registration`. On startup they copy valid registrations still available in older `target/s200-registration` folders into the per-user store. [S200 Bluetooth protocol capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#data-channel)
@@ -60,7 +60,7 @@ In the desktop app, select **Set up scale**, then **Open Xiaomi sign-in**. Sign 
 To register from the terminal, run:
 
 ```powershell
-cargo run -- --register-scale
+cargo run -p blt_unlock -- --register-scale
 ```
 
 Sign in once using the link from Xiaomi. When the Bluetooth scan starts, step on the unregistered S200 you want to register. The CLI reuses the Europe session to allocate a device ID and request Xiaomi's signed authorization during the Bluetooth handshake.
@@ -70,7 +70,7 @@ Wait for `Scale setup complete`. The CLI saves pending keys to the per-user stor
 ## Inspect scale setup
 
 ```powershell
-cargo run -- --check-setup
+cargo run -p blt_unlock -- --check-setup
 ```
 
 Wake the S200 during the scan. The command checks Bluetooth discovery, the advertised registration mode, and the Standard Auth GATT characteristic. If Xiaomi supplies a browser link, sign in once. The same session is used to check the Europe API. The terminal reports pass, fail, or skip for each check. These checks are read-only.
@@ -78,17 +78,17 @@ Wake the S200 during the scan. The command checks Bluetooth discovery, the adver
 To inspect only the setup information in the scale's broadcasts, run:
 
 ```powershell
-cargo run -- --setup-info --seconds 30
+cargo run -p blt_unlock -- --setup-info --seconds 30
 ```
 
 Step on the scale during the scan. This read-only command reports the advertised product ID and MiBeacon version without a bind key. For MiBeacon v5 it also reports the authentication mode, registration status, and whether the scale is requesting setup.
 
 The connection guide shows how the app derives the login token and bind key with P-256 ECDH and HKDF-SHA256, requests Xiaomi's signed authorization, and sends it to the scale. [Registration algorithm](docs/scale-connection.html#registration-heading) · [S200 registration capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#registration-for-completeness-not-needed-in-practice)
 
-To try local Standard Auth setup on an unregistered S200 `ms113`, place your test certificate at `crates/scale/src/setup/s200-local-test.der` and run from the repository root while the scale is requesting setup.
+To try local Standard Auth setup on an unregistered S200 `ms113`, place your test certificate at `crates/scale/src/setup/s200-local-test.der`, run from the repository root, and wake the scale when the scan starts.
 
 ```powershell
-cargo run -- --setup-test-cert --seconds 30
+cargo run -p blt_unlock -- --setup-test-cert --seconds 30
 ```
 
 The CLI requests setup information, exchanges P-256 public keys, and sends an encrypted local test device ID followed by the local test certificate. It saves pending keys with the scale’s address in the per-user store before sending the proof. A transfer acknowledgment confirms delivery only. When the scale’s control characteristic confirms registration, both readers can use the saved keys.
@@ -96,7 +96,7 @@ The CLI requests setup information, exchanges P-256 public keys, and sends an en
 ## Verify Xiaomi browser sign-in
 
 ```powershell
-cargo run -- --xiaomi-sign-in
+cargo run -p blt_unlock -- --xiaomi-sign-in
 ```
 
 Open the one-time link printed in the terminal. Enter your credentials on Xiaomi's page and keep the terminal open until it confirms the smart-home session. The command checks account authorization. Scale registration is a separate step.
@@ -104,7 +104,7 @@ Open the one-time link printed in the terminal. Enter your credentials on Xiaomi
 To check whether the Europe API accepts the session, sign in through a new one-time link.
 
 ```powershell
-cargo run -- --xiaomi-check-cloud
+cargo run -p blt_unlock -- --xiaomi-check-cloud
 ```
 
 The command makes a read-only, signed request for your account's device count and reports whether Xiaomi accepted it. The session stays in memory for that run.

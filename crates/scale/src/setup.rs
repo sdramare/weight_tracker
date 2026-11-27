@@ -3,6 +3,7 @@ mod connected_weight;
 mod registration;
 mod registration_crypto;
 
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::time::Duration;
 use std::{fmt, io};
@@ -23,7 +24,7 @@ pub use registration::{
     register_scale_europe_while,
 };
 
-/// Finds the first connectable S200 ms113 that requests Standard Auth registration.
+/// Finds the first connectable S200 ms113 that advertises unregistered Standard Auth.
 pub fn find_registration_scale(duration: Duration) -> io::Result<Scale> {
     find_registration_scale_while(duration, &|| true)
 }
@@ -35,27 +36,87 @@ fn find_registration_scale_while(
     check_cancellation(keep_going)?;
     let _apartment = Apartment::initialize()?;
     let mut candidate = None;
-    discovery::discover(duration, None, keep_going, |scale| {
-        if registration_ready(scale) {
-            candidate = Some(scale.clone());
-            return ControlFlow::Break(());
-        }
-        ControlFlow::Continue(())
-    })?;
+    let mut blockers = HashMap::new();
+    discovery::discover(
+        duration,
+        None,
+        keep_going,
+        |scale| match registration_status(scale) {
+            Ok(()) => {
+                candidate = Some(scale.clone());
+                ControlFlow::Break(())
+            }
+            Err(blocker) => {
+                blockers.insert(scale.address(), blocker);
+                ControlFlow::Continue(())
+            }
+        },
+    )?;
     check_cancellation(keep_going)?;
     candidate.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "no connectable, unregistered S200 ms113 requested setup",
+        blockers.into_values().max().map_or_else(
+            || io::Error::new(
+                io::ErrorKind::NotFound,
+                "Windows did not see an S200 during this scan. Keep the scale near this PC and step on it when setup starts scanning.",
+            ),
+            |blocker| io::Error::new(io::ErrorKind::NotFound, blocker.message()),
         )
     })
 }
 
 pub(super) fn registration_ready(scale: &Scale) -> bool {
-    scale.is_connectable()
-        && scale
-            .setup_info()
-            .is_some_and(|info| info.requests_certificate_test())
+    registration_status(scale).is_ok()
+}
+
+fn registration_status(scale: &Scale) -> Result<(), SetupBlocker> {
+    advertised_registration_status(scale)?;
+    if !scale.is_connectable() {
+        return Err(SetupBlocker::NotConnectable);
+    }
+    Ok(())
+}
+
+pub(super) fn advertised_registration_status(scale: &Scale) -> Result<(), SetupBlocker> {
+    scale
+        .setup_info()
+        .ok_or(SetupBlocker::MissingSetupInfo)?
+        .registration_status()
+}
+
+/// In a scan with several scales, prefer evidence from a supported ms113.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum SetupBlocker {
+    MissingSetupInfo,
+    OtherModel,
+    UnknownSetupState,
+    OtherAuthentication,
+    AlreadyRegistered,
+    NotConnectable,
+}
+
+impl SetupBlocker {
+    pub(super) fn message(self) -> &'static str {
+        match self {
+            Self::MissingSetupInfo => {
+                "Windows saw the S200's name but did not receive its setup information. Bring it closer to this PC and wake it again while setup scans."
+            }
+            Self::OtherModel => {
+                "Windows saw an S200 variant that this app cannot set up. This setup flow supports the ms113 Bluetooth variant."
+            }
+            Self::UnknownSetupState => {
+                "Windows saw an S200 ms113 but its broadcast did not include a supported setup status."
+            }
+            Self::OtherAuthentication => {
+                "Windows saw an S200 ms113 using a Bluetooth authentication mode this app does not support for setup."
+            }
+            Self::AlreadyRegistered => {
+                "The S200 still reports an existing pairing. If you intend to reset it, hold Reset under the battery cover for 7 seconds. Wait for all LEDs to light and the display to return to 0.0, then retry setup."
+            }
+            Self::NotConnectable => {
+                "Windows saw an unpaired S200 but did not receive a Bluetooth connection offer. Close any app connected to the scale and wake it again near this PC while setup scans."
+            }
+        }
+    }
 }
 
 /// Connects to the scale and checks for the Xiaomi Standard Auth characteristic.
@@ -134,30 +195,36 @@ impl ScaleSetupInfo {
         self.flags.map(|flags| flags.registered)
     }
 
-    /// The supported variant is unregistered and currently requesting Standard Auth setup.
+    /// Whether this supported, unregistered variant actively requests setup in its broadcast.
     pub fn requests_certificate_test(&self) -> bool {
-        self.is_ms113()
-            && matches!(
-                self.flags,
-                Some(SetupFlags {
-                    authentication: Authentication::Standard,
-                    registered: false,
-                    solicited: true,
-                })
-            )
+        self.registration_status().is_ok() && self.flags.is_some_and(|flags| flags.solicited)
+    }
+
+    fn registration_status(&self) -> Result<(), SetupBlocker> {
+        if !self.is_ms113() {
+            return Err(SetupBlocker::OtherModel);
+        }
+        let flags = self.flags.ok_or(SetupBlocker::UnknownSetupState)?;
+        if flags.registered {
+            return Err(SetupBlocker::AlreadyRegistered);
+        }
+        if flags.authentication != Authentication::Standard {
+            return Err(SetupBlocker::OtherAuthentication);
+        }
+        // The solicitation flag controls whether the scale initiates a pairing prompt.
+        // Setup started by the user can proceed to the device's GATT capability check.
+        Ok(())
     }
 
     pub(super) fn from_mibeacon(data: &[u8]) -> Option<Self> {
-        let [
-            0x95,
-            0xfe,
-            control_low,
-            control_high,
-            product_low,
-            product_high,
-            ..,
-        ] = data
-        else {
+        let [0x95, 0xfe, frame @ ..] = data else {
+            return None;
+        };
+        Self::from_mibeacon_frame(frame)
+    }
+
+    pub(super) fn from_mibeacon_frame(frame: &[u8]) -> Option<Self> {
+        let [control_low, control_high, product_low, product_high, ..] = frame else {
             return None;
         };
         let product_id = u16::from_le_bytes([*product_low, *product_high]);
@@ -224,7 +291,8 @@ impl fmt::Display for ScaleSetupInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{Authentication, ScaleSetupInfo, SetupFlags};
+    use super::{Authentication, ScaleSetupInfo, SetupBlocker, SetupFlags, registration_status};
+    use crate::{BluetoothAddress, Scale, SignalStrength};
 
     #[test]
     fn recognizes_s200_mibeacon_headers() {
@@ -260,5 +328,41 @@ mod tests {
                 .flags,
             None
         );
+    }
+
+    #[test]
+    fn reads_the_same_setup_flags_from_xiaomi_manufacturer_and_service_data() {
+        let manufacturer_frame = [0x10, 0x59, 0xcb, 0x4d];
+        let setup = ScaleSetupInfo::from_mibeacon_frame(&manufacturer_frame).unwrap();
+        assert_eq!(
+            Some(setup),
+            ScaleSetupInfo::from_mibeacon(&[0x95, 0xfe, 0x10, 0x59, 0xcb, 0x4d])
+        );
+        assert_eq!(setup.registered(), Some(true));
+        assert!(ScaleSetupInfo::from_mibeacon_frame(&manufacturer_frame[..3]).is_none());
+    }
+
+    #[test]
+    fn manual_setup_accepts_an_unpaired_ms113_with_or_without_solicitation() {
+        for (control, connectable, expected) in [
+            (0x58, true, Ok(())),
+            (0x5a, true, Ok(())),
+            (0x59, true, Err(SetupBlocker::AlreadyRegistered)),
+            (0x5b, true, Err(SetupBlocker::AlreadyRegistered)),
+            (0x58, false, Err(SetupBlocker::NotConnectable)),
+            (0x48, true, Err(SetupBlocker::UnknownSetupState)),
+            (0x54, true, Err(SetupBlocker::OtherAuthentication)),
+        ] {
+            let scale = Scale {
+                address: BluetoothAddress(1),
+                address_type: None,
+                name: None,
+                signal_strength: SignalStrength(-60),
+                connectable,
+                weight: None,
+                setup_info: ScaleSetupInfo::from_mibeacon_frame(&[0x10, control, 0xcb, 0x4d]),
+            };
+            assert_eq!(registration_status(&scale), expected, "0x{control:02X}");
+        }
     }
 }

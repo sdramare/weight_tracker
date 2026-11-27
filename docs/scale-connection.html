@@ -104,7 +104,7 @@
         <p>Open the desktop app and keep listening for scales and weigh-ins.</p>
       </div>
       <div class="quick-start">
-        <code class="command">cargo run</code>
+        <code class="command">cargo run -p blt_unlock</code>
         <p>Connect to the first available scale and list its GATT services.</p>
       </div>
       <p class="intro">Run either command from the project folder, then step on the scale to wake it.</p>
@@ -180,7 +180,7 @@
         <div class="diagram" role="region" aria-label="Scrollable scale recognition diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 246" role="img" aria-labelledby="match-title match-description">
             <title id="match-title">S200 recognition for the desktop and terminal apps</title>
-            <desc id="match-description">The shared library recognizes the S200 by its Bluetooth name or the S200 product ID in Xiaomi MiBeacon service data. The desktop app lists every recognized address. The terminal app waits for a connectable advertisement from the same address and then connects. Identification and connectability can arrive in separate packets.</desc>
+            <desc id="match-description">The shared library recognizes the S200 by its Bluetooth name or the S200 product ID in Xiaomi MiBeacon service or manufacturer data. The desktop app lists every recognized address. The terminal app waits for a connectable advertisement from the same address and then connects. Identification and connectability can arrive in separate packets.</desc>
             <defs>
               <marker id="match-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
@@ -191,8 +191,8 @@
             <text class="node-detail" x="140" y="57">Xiaomi Scale S200</text>
             <text class="node-detail" x="140" y="73">Xiaomi Smart Scale S200</text>
             <rect class="node" x="20" y="112" width="240" height="64" rx="8"/>
-            <text class="node-title" x="140" y="139">MiBeacon service data</text>
-            <text class="node-detail" x="140" y="159">Xiaomi tag and S200 product ID</text>
+            <text class="node-title" x="140" y="139">MiBeacon data</text>
+            <text class="node-detail" x="140" y="159">Xiaomi service or manufacturer</text>
 
             <path class="arrow" d="M260 50H281Q297 50 297 66V79 M260 144H281Q297 144 297 128V115"/>
             <circle class="node" cx="297" cy="97" r="18"/>
@@ -217,8 +217,8 @@
         <figcaption>Windows can deliver identification and connectability in separate packets. The app combines them when both use the same Bluetooth address.</figcaption>
       </figure>
       <ol class="steps">
-        <li><strong>Start an active WinRT advertisement watcher.</strong> When a broadcast bind key is available, the watcher also requests extended advertisements. Skip address zero (anonymous) and a received signal strength of <code>−127 dBm</code> (stale or out of range).</li>
-        <li><strong>Recognize an S200.</strong> Match a case-insensitive name prefix from the diagram or look for advertisement data type <code>0x16</code>, which carries service data with a 16-bit UUID. Read its first six bytes as <code>95 FE ∥ control LE16 ∥ product LE16</code>. The bytes <code>95 FE</code> identify Xiaomi service data because they encode <code>FE95</code> in little-endian order. The control word describes the frame, and the product ID identifies the scale variant. The app recognizes IDs <code>0x45C9</code>, <code>0x4C04</code>, and <code>0x4DCB</code> (ms113).</li>
+        <li><strong>Start an active WinRT advertisement watcher.</strong> Request both legacy and extended advertisements, including during setup before a bind key exists. Skip address zero (anonymous) and a received signal strength of <code>−127 dBm</code> (stale or out of range).</li>
+        <li><strong>Recognize an S200.</strong> Match a case-insensitive name prefix from the diagram or read the MiBeacon header. Advertisement data type <code>0x16</code> carries 16-bit service data. Its Xiaomi header starts with <code>95 FE</code>, the little-endian encoding of the <code>FE95</code> service UUID, followed by the 16-bit control word and product ID in little-endian order. If the service header is missing, check manufacturer data for Xiaomi’s company ID (<code>0x038F</code>), where the same control and product fields start at the first byte. The app recognizes product IDs <code>0x45C9</code>, <code>0x4C04</code>, and <code>0x4DCB</code> (ms113).</li>
         <li><strong>Determine connectability.</strong> Directed and undirected connectable advertisements qualify. An extended advertisement qualifies when Windows sets <code>IsConnectable</code>.</li>
         <li><strong>Merge by address.</strong> Keep the most recent signal and any new name, address type, setup info, or decoded weight. Recognition and connectability stay set for the lifetime of the candidate. Emit recognized candidates when those fields change. In continuous mode, also emit each freshly decoded weight and prune stale candidates every 30 seconds.</li>
       </ol>
@@ -229,7 +229,7 @@
           <tbody>
             <tr><th scope="row">15–12</th><td>MiBeacon version. The three setup fields below are decoded for v5.</td></tr>
             <tr><th scope="row">11–10</th><td><code>0</code> legacy, <code>1</code> secure, <code>2</code> Standard Auth, <code>3</code> reserved.</td></tr>
-            <tr><th scope="row">9</th><td>Set when the device is soliciting setup.</td></tr>
+            <tr><th scope="row">9</th><td>Set when the scale asks the app to initiate setup. The app also checks for an eligible scale when the user starts setup manually.</td></tr>
             <tr><th scope="row">8</th><td>Set when the device is registered.</td></tr>
           </tbody>
         </table>
@@ -262,7 +262,7 @@
             <text class="node-detail node-inverse" x="710" y="69">Decrypt scale readings</text>
           </svg>
         </div>
-        <figcaption>Use <code>cargo run -- --weight</code> for one settled reading. The desktop app repeats the cycle while it is running.</figcaption>
+        <figcaption>Use <code>cargo run -p blt_unlock -- --weight</code> for one settled reading. The desktop app repeats the cycle while it is running.</figcaption>
       </figure>
       <h3>Choose the saved token</h3>
       <ol class="steps">
@@ -394,19 +394,19 @@
       <ol class="steps">
         <li>Select <strong>Set up scale</strong>. The background worker pauses weight monitoring and starts the same registration flow used by the terminal.</li>
         <li>Select <strong>Open Xiaomi sign-in</strong> to sign in in your browser. If you need to open the URL manually, use <strong>Copy sign-in link</strong>. Return to the app once you have signed in.</li>
-        <li>When the dialog prompts you, wake only the unregistered S200 you want to set up. The scan lasts up to 30 seconds and uses the first eligible scale. You can cancel while signing in, checking the account, or scanning. The current request finishes before cancellation takes effect.</li>
+        <li>After the dialog confirms Xiaomi sign-in, step on the S200 near your PC to wake it. The scan lasts up to 30 seconds and uses the first eligible scale. You can cancel while signing in, checking the account, or scanning. The current request finishes before cancellation takes effect.</li>
         <li>Wait for <strong>Setup complete</strong>, then step on the scale to weigh. The app reloads the local keys and resumes monitoring when the attempt ends.</li>
       </ol>
       <h3>Set up from the terminal</h3>
       <div class="quick-start">
-        <code class="command">cargo run -- --register-scale</code>
+        <code class="command">cargo run -p blt_unlock -- --register-scale</code>
         <p>Sign in once, then wake the unregistered scale when the terminal starts scanning.</p>
       </div>
       <figure>
         <div class="diagram" role="region" aria-label="Scrollable scale registration diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 110" role="img" aria-labelledby="registration-title registration-description">
             <title id="registration-title">Scale registration in one run</title>
-            <desc id="registration-description">The app signs in through Xiaomi, derives setup keys with P-256 ECDH and HKDF-SHA256, obtains a signed identity and certificate from the Europe API, and sends them over Bluetooth for the scale to confirm.</desc>
+            <desc id="registration-description">The app signs in through Xiaomi and scans for a connectable unregistered S200 ms113. It checks the scale's setup capabilities and derives setup keys with P-256 ECDH and HKDF-SHA256, obtains a signed identity and certificate from the Europe API, and sends them over Bluetooth for the scale to confirm.</desc>
             <defs>
               <marker id="registration-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
@@ -420,7 +420,7 @@
             <rect class="node" x="425" y="23" width="185" height="66" rx="12"/>
             <rect class="node-accent" x="630" y="23" width="195" height="66" rx="12"/>
             <text class="node-title" x="107" y="52">Sign in</text>
-            <text class="node-detail" x="107" y="72">Browser and Europe API</text>
+            <text class="node-detail" x="107" y="72">Verify account, then scan</text>
             <text class="node-title" x="312" y="52">Derive setup keys</text>
             <text class="node-detail" x="312" y="72">P-256 ECDH and HKDF</text>
             <text class="node-title" x="517" y="52">Obtain Xiaomi proof</text>
@@ -433,7 +433,7 @@
       </figure>
       <h3>Find the scale and derive credentials</h3>
       <ol class="steps">
-        <li><strong>Choose a scale requesting setup.</strong> Open one <a href="#cloud-heading">Xiaomi cloud session</a> and verify it with the read-only device-count request. Scan for a connectable ms113 (product ID <code>0x4DCB</code>) whose MiBeacon v5 flags advertise Standard Auth, a setup request, and an unregistered state.</li>
+        <li><strong>Find an unregistered scale.</strong> Open one <a href="#cloud-heading">Xiaomi cloud session</a> and verify it with the read-only device-count request. Scan for a connectable ms113 (product ID <code>0x4DCB</code>) whose MiBeacon v5 flags advertise Standard Auth and an unregistered state. Starting setup manually accepts both values of the solicitation flag. A scale can appear in the list as soon as its name or product ID arrives, while setup waits for both the registration flags and a connectable advertisement.</li>
         <li><strong>Find the Xiaomi service (<code>FE95</code>).</strong> Ask Windows to query the scale directly. In the returned service, find and subscribe to the <a href="#endpoints-heading">control (<code>0010</code>) and authentication (<code>0019</code>) characteristics</a>. Read the negotiated packet size (ATT MTU) to calculate how much fits in a write.</li>
         <li><strong>Check the scale’s setup capabilities.</strong> Send the device information request (<code>A2 00 00 00</code>) to the control characteristic. The app expects a device information reply in authentication block <code>00</code> with payload <code>02 00 00 00</code>. That payload identifies the supported profile with no out-of-band verification step.</li>
         <li><strong>Send and receive public keys.</strong> Generate an ephemeral P-256 key pair and write the start key exchange command (<code>15 00 00 00</code>) to the control characteristic. Send the app’s 64-byte <code>X ∥ Y</code> public key in authentication block <code>03</code>, the public-key block. Wait for acknowledgment, then receive the scale’s key in the same block type. Require 64 bytes and prepend <code>04</code>, the SEC1 marker for uncompressed point coordinates, before validating the point.</li>
@@ -539,11 +539,11 @@
     <section class="panel" aria-labelledby="setup-heading">
       <h2 id="setup-heading">Run setup diagnostics</h2>
       <div class="quick-start">
-        <code class="command">cargo run -- --check-setup</code>
+        <code class="command">cargo run -p blt_unlock -- --check-setup</code>
         <p>Wake the scale, then sign in once. See a result for each Bluetooth and Xiaomi account check.</p>
       </div>
       <div class="quick-start">
-        <code class="command">cargo run -- --setup-info --seconds 30</code>
+        <code class="command">cargo run -p blt_unlock -- --setup-info --seconds 30</code>
         <p>Wake the scale during the scan. No bind key is required.</p>
       </div>
       <p class="note"><code>--setup-info</code> scans for the full window. It prints each address’s first setup report and any changes to its product ID, version, or setup flags. It returns an error when no decoded setup report arrives.</p>
@@ -563,7 +563,7 @@
       <p><code>--check-setup</code> prints pass, fail, and skip totals. Any failed or skipped check yields a nonzero exit code. The checks leave the scale’s registration state untouched.</p>
       <h3>Test a local certificate</h3>
       <div class="quick-start" style="margin-top: .75rem">
-        <code class="command">cargo run -- --setup-test-cert --seconds 30</code>
+        <code class="command">cargo run -p blt_unlock -- --setup-test-cert --seconds 30</code>
         <p>Try setup using the certificate at <code>crates/scale/src/setup/s200-local-test.der</code> and an encrypted test identity.</p>
       </div>
       <ol class="steps">
@@ -573,11 +573,11 @@
       </ol>
       <h3>Check the account separately</h3>
       <div class="quick-start">
-        <code class="command">cargo run -- --xiaomi-sign-in</code>
+        <code class="command">cargo run -p blt_unlock -- --xiaomi-sign-in</code>
         <p>Verify Xiaomi smart-home account authorization using a one-time browser link.</p>
       </div>
       <div class="quick-start">
-        <code class="command">cargo run -- --xiaomi-check-cloud</code>
+        <code class="command">cargo run -p blt_unlock -- --xiaomi-check-cloud</code>
         <p>Sign in and check whether Xiaomi’s Europe API accepts a signed, read-only account request.</p>
       </div>
       <p class="source"><a href="../crates/scale/src/diagnostics.rs">Check dependencies</a> · <a href="../crates/cli/src/main.rs">CLI results and exit codes</a></p>
@@ -586,7 +586,9 @@
     <section class="panel" aria-labelledby="help-heading">
       <h2 id="help-heading">If the connection fails</h2>
       <div class="help">
-        <p><strong>Scale missing</strong>Wake it while the app is listening. Use <code>--setup-info</code> to confirm that it is advertising the expected product ID and setup state.</p>
+        <p><strong>Setup scan found no S200</strong>Keep it near your PC and step on it when setup starts scanning. Use <code>--setup-info</code> to inspect the product ID and setup flags.</p>
+        <p><strong>Setup scan saw an unpaired scale without a connection offer</strong>Close any app connected to the scale, then wake it again while setup scans.</p>
+        <p><strong>Setup scan still saw an existing pairing</strong>If you intend to clear the pairing and the measurements stored on the scale, hold Reset under the battery cover for seven seconds. Wait for all LEDs to light and the display to return to zero, then retry setup. <a href="https://www.mi.com/my/support/faq/details/KA-517701/">Xiaomi’s reset instructions</a></p>
         <p><strong>Scale unreachable</strong>Close Xiaomi Home if it is connected, then wake the scale again.</p>
         <p><strong>Bluetooth unavailable</strong>Turn Bluetooth on. The desktop app retries automatically.</p>
         <p><strong>Login token rejected</strong>Check the saved registration file for the scale’s address and run <code>--weight</code> again. Restart the desktop app after replacing its saved credentials.</p>

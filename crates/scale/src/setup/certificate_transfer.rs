@@ -14,7 +14,8 @@ use windows::Storage::Streams::{DataReader, DataWriter};
 
 use super::registration_crypto::{Registration, RegistrationKeys};
 use super::{
-    Apartment, Scale, check_service_status, open_scale_device, setup_characteristic, setup_service,
+    Apartment, Scale, check_service_status, open_scale_device, registration_status,
+    setup_characteristic, setup_service,
 };
 use crate::login_keys::{CONFIRMED_SUFFIX, PENDING_SUFFIX, REJECTED_SUFFIX};
 
@@ -121,15 +122,8 @@ pub(super) fn register_with<T>(
     scale: &Scale,
     authorize: impl FnOnce(&Registration) -> io::Result<(RegistrationProof, T)>,
 ) -> io::Result<(SetupCertificateReply, T)> {
-    if !scale
-        .setup_info()
-        .is_some_and(|info| info.requests_certificate_test())
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the scale must be an unregistered ms113 requesting setup",
-        ));
-    }
+    registration_status(scale)
+        .map_err(|blocker| io::Error::new(io::ErrorKind::InvalidInput, blocker.message()))?;
     let _apartment = Apartment::initialize()?;
     let device = open_scale_device(scale)?;
     let service = setup_service(&device)?;

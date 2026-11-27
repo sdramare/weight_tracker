@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use super::cloud_sign_in::check_xiaomi_cloud_europe;
-use super::setup::registration_ready;
+use super::setup::{advertised_registration_status, registration_ready};
 use super::{Scale, XiaomiSignInLink, discover_scales, probe_setup_service};
 
 /// A read-only check of the prerequisites for S200 registration.
@@ -87,15 +87,8 @@ fn check_bluetooth(scan_time: Duration, report: &mut impl FnMut(SetupCheck, Setu
         }
     };
 
-    let readiness = match scale.setup_info() {
-        Some(info) if info.requests_certificate_test() => Ok(()),
-        Some(info) => Err(io::Error::other(format!(
-            "the scale is not requesting supported setup ({info})"
-        ))),
-        None => Err(io::Error::other(
-            "the scale did not advertise MiBeacon setup information",
-        )),
-    };
+    let readiness = advertised_registration_status(&scale)
+        .map_err(|blocker| io::Error::other(blocker.message()));
     report(SetupCheck::RegistrationReadiness, result_status(&readiness));
 
     report(SetupCheck::StandardAuthGatt, SetupCheckStatus::Started);
