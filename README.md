@@ -83,6 +83,8 @@ cargo run -p blt_unlock -- --setup-info --seconds 30
 
 Step on the scale during the scan. This read-only command reports the advertised product ID and MiBeacon version without a bind key. For MiBeacon v5 it also reports the authentication mode, registration status, and whether the scale is requesting setup.
 
+To check the setup capability reply over Bluetooth without signing in or starting registration, use `cargo run -p blt_unlock -- --setup-profile` and wake the unpaired scale during the scan.
+
 The connection guide shows how the app derives the login token and bind key with P-256 ECDH and HKDF-SHA256, requests Xiaomi's signed authorization, and sends it to the scale. [Registration algorithm](docs/scale-connection.html#registration-heading) · [S200 registration capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#registration-for-completeness-not-needed-in-practice)
 
 To try local Standard Auth setup on an unregistered S200 `ms113`, place your test certificate at `crates/scale/src/setup/s200-local-test.der`, run from the repository root, and wake the scale when the scan starts.

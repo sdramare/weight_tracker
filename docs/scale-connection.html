@@ -435,7 +435,7 @@
       <ol class="steps">
         <li><strong>Find an unregistered scale.</strong> Open one <a href="#cloud-heading">Xiaomi cloud session</a> and verify it with the read-only device-count request. Scan for a connectable ms113 (product ID <code>0x4DCB</code>) whose MiBeacon v5 flags advertise Standard Auth and an unregistered state. Starting setup manually accepts both values of the solicitation flag. A scale can appear in the list as soon as its name or product ID arrives, while setup waits for both the registration flags and a connectable advertisement.</li>
         <li><strong>Find the Xiaomi service (<code>FE95</code>).</strong> Ask Windows to query the scale directly. In the returned service, find and subscribe to the <a href="#endpoints-heading">control (<code>0010</code>) and authentication (<code>0019</code>) characteristics</a>. Read the negotiated packet size (ATT MTU) to calculate how much fits in a write.</li>
-        <li><strong>Check the scale’s setup capabilities.</strong> Send the device information request (<code>A2 00 00 00</code>) to the control characteristic. The app expects a device information reply in authentication block <code>00</code> with payload <code>02 00 00 00</code>. That payload identifies the supported profile with no out-of-band verification step.</li>
+        <li><strong>Check the scale’s setup capabilities.</strong> Send the device information request (<code>A2 00 00 00</code>) to the control characteristic and reassemble the reply in authentication block <code>00</code>. The app accepts the two observed reply sizes, 4 and 24 bytes, when the first four bytes are <code>02 00 00 00</code>. That header identifies the supported profile with no out-of-band verification step. The longer reply carries 20 additional bytes that this flow does not use.</li>
         <li><strong>Send and receive public keys.</strong> Generate an ephemeral P-256 key pair and write the start key exchange command (<code>15 00 00 00</code>) to the control characteristic. Send the app’s 64-byte <code>X ∥ Y</code> public key in authentication block <code>03</code>, the public-key block. Wait for acknowledgment, then receive the scale’s key in the same block type. Require 64 bytes and prepend <code>04</code>, the SEC1 marker for uncompressed point coordinates, before validating the point.</li>
         <li><strong>Derive the setup keys.</strong> Compute the P-256 ECDH shared secret. Expand 64 bytes with HKDF-SHA256, no explicit salt, and ASCII <code>mible-setup-info</code> as the protocol’s setup context label. Use bytes <code>[0,12)</code> as the login token, <code>[12,28)</code> as the bind key, and <code>[28,44)</code> as the identity-encryption key.</li>
       </ol>
@@ -547,6 +547,10 @@
         <p>Wake the scale during the scan. No bind key is required.</p>
       </div>
       <p class="note"><code>--setup-info</code> scans for the full window. It prints each address’s first setup report and any changes to its product ID, version, or setup flags. It returns an error when no decoded setup report arrives.</p>
+      <div class="quick-start">
+        <code class="command">cargo run -p blt_unlock -- --setup-profile</code>
+        <p>Wake the scale during the scan. This check connects to an unpaired ms113 and requests its Bluetooth setup profile. It prints the profile header, the length for an extended reply, and whether the app supports it. It finishes before key exchange or Xiaomi sign-in.</p>
+      </div>
       <h3>How the five checks depend on each other</h3>
       <div class="fields" role="region" aria-label="Setup checks and dependencies" tabindex="0">
         <table>
@@ -589,6 +593,7 @@
         <p><strong>Setup scan found no S200</strong>Keep it near your PC and step on it when setup starts scanning. Use <code>--setup-info</code> to inspect the product ID and setup flags.</p>
         <p><strong>Setup scan saw an unpaired scale without a connection offer</strong>Close any app connected to the scale, then wake it again while setup scans.</p>
         <p><strong>Setup scan still saw an existing pairing</strong>If you intend to clear the pairing and the measurements stored on the scale, hold Reset under the battery cover for seven seconds. Wait for all LEDs to light and the display to return to zero, then retry setup. <a href="https://www.mi.com/my/support/faq/details/KA-517701/">Xiaomi’s reset instructions</a></p>
+        <p><strong>Unexpected Bluetooth setup reply</strong>The app connected to the scale and received a device-information reply it could not use. The error shows the scale’s address and the observed profile. Run <code>--setup-profile</code> to repeat just that Bluetooth check.</p>
         <p><strong>Scale unreachable</strong>Close Xiaomi Home if it is connected, then wake the scale again.</p>
         <p><strong>Bluetooth unavailable</strong>Turn Bluetooth on. The desktop app retries automatically.</p>
         <p><strong>Login token rejected</strong>Check the saved registration file for the scale’s address and run <code>--weight</code> again. Restart the desktop app after replacing its saved credentials.</p>

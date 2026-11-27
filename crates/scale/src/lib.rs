@@ -25,8 +25,8 @@ pub use diagnostics::{SetupCheck, SetupCheckStatus, check_scale_setup};
 pub use login_keys::{SavedScaleLogins, ScaleLoginToken, default_registration_directory};
 pub use setup::{
     ConnectedWeightEvent, RegisteredScale, RegistrationEvent, RegistrationStep, ScaleSetupInfo,
-    SetupCertificateReply, find_registration_scale, listen_for_connected_weight,
-    probe_setup_service, register_scale_europe, register_scale_europe_while,
+    SetupCertificateReply, SetupProfile, find_registration_scale, listen_for_connected_weight,
+    probe_setup_profile, probe_setup_service, register_scale_europe, register_scale_europe_while,
     send_setup_test_certificate, watch_connected_weights,
 };
 pub use types::{

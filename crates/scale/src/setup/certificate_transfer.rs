@@ -4,10 +4,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 
+use windows::Devices::Bluetooth::BluetoothLEDevice;
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
     GattCharacteristic, GattCharacteristicProperties,
-    GattClientCharacteristicConfigurationDescriptorValue, GattValueChangedEventArgs,
-    GattWriteOption,
+    GattClientCharacteristicConfigurationDescriptorValue, GattDeviceService,
+    GattValueChangedEventArgs, GattWriteOption,
 };
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter};
@@ -25,6 +26,8 @@ const CERTIFICATE_MTU: u16 = 23;
 const DEVICE_INFO_OR_ID: u8 = 0x00;
 const PUBLIC_KEY_BLOCK: u8 = 0x03;
 const REQUEST_DEVICE_INFO: [u8; 4] = [0xa2, 0, 0, 0];
+const NO_OOB_PROFILE_HEADER: [u8; 4] = [2, 0, 0, 0];
+const EXTENDED_DEVICE_INFO_LENGTH: usize = 24;
 const START_KEY_EXCHANGE: [u8; 4] = [0x15, 0, 0, 0];
 const CONFIRM_REGISTRATION: [u8; 4] = [0x13, 0, 0, 0];
 pub(super) const READY: [u8; 4] = [0, 0, 1, 1];
@@ -53,6 +56,41 @@ impl fmt::Display for SetupCertificateReply {
             }
         })
     }
+}
+
+/// The device-information reply from the scale's Standard Auth service.
+pub struct SetupProfile(Vec<u8>);
+
+impl SetupProfile {
+    /// Checks for the no-OOB profile in either observed ms113 reply format.
+    pub fn supports_registration(&self) -> bool {
+        let length = self.0.len();
+        (length == NO_OOB_PROFILE_HEADER.len() || length == EXTENDED_DEVICE_INFO_LENGTH)
+            && self.0.starts_with(&NO_OOB_PROFILE_HEADER)
+    }
+}
+
+impl fmt::Display for SetupProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = self.0.as_slice();
+        if let [a, b, c, d, rest @ ..] = bytes {
+            write!(formatter, "{a:02X} {b:02X} {c:02X} {d:02X}")?;
+            if !rest.is_empty() {
+                write!(formatter, " … ({} bytes total)", bytes.len())?;
+            }
+            return Ok(());
+        }
+        write!(
+            formatter,
+            "a device-information block of {} bytes",
+            bytes.len()
+        )
+    }
+}
+
+/// Reads the Bluetooth setup profile without starting registration.
+pub fn probe_setup_profile(scale: &Scale) -> io::Result<SetupProfile> {
+    SetupLink::open(scale)?.read_profile()
 }
 
 /// Attempts Standard Auth registration of an unregistered ms113 using a local identity.
@@ -118,69 +156,114 @@ pub(super) struct RegistrationProof {
     pub(super) certificate: Vec<u8>,
 }
 
+struct SetupLink {
+    _control_subscription: Subscription,
+    _auth_subscription: Subscription,
+    control: GattCharacteristic,
+    auth: GattCharacteristic,
+    replies: Receiver<(Channel, Vec<u8>)>,
+    service: GattDeviceService,
+    _device: BluetoothLEDevice,
+    _apartment: Apartment,
+}
+
+impl SetupLink {
+    fn open(scale: &Scale) -> io::Result<Self> {
+        let apartment = Apartment::initialize()?;
+        let device = open_scale_device(scale)?;
+        let service = setup_service(&device)?;
+        let control = setup_characteristic(&service, 0x0010)?;
+        let auth = setup_characteristic(&service, 0x0019)?;
+        let (sender, replies) = mpsc::channel();
+        let control_subscription = Subscription::start(&control, Channel::Control, sender.clone())?;
+        let auth_subscription = Subscription::start(&auth, Channel::Auth, sender)?;
+        Ok(Self {
+            _control_subscription: control_subscription,
+            _auth_subscription: auth_subscription,
+            control,
+            auth,
+            replies,
+            service,
+            _device: device,
+            _apartment: apartment,
+        })
+    }
+
+    fn read_profile(&self) -> io::Result<SetupProfile> {
+        write_packet(&self.control, &REQUEST_DEVICE_INFO)?;
+        receive_block(
+            &self.auth,
+            &self.replies,
+            DEVICE_INFO_OR_ID,
+            "device information",
+        )
+        .map(SetupProfile)
+    }
+}
+
 pub(super) fn register_with<T>(
     scale: &Scale,
     authorize: impl FnOnce(&Registration) -> io::Result<(RegistrationProof, T)>,
 ) -> io::Result<(SetupCertificateReply, T)> {
     registration_status(scale)
         .map_err(|blocker| io::Error::new(io::ErrorKind::InvalidInput, blocker.message()))?;
-    let _apartment = Apartment::initialize()?;
-    let device = open_scale_device(scale)?;
-    let service = setup_service(&device)?;
-    let control = setup_characteristic(&service, 0x0010)?;
-    let auth = setup_characteristic(&service, 0x0019)?;
-    let (sender, replies) = mpsc::channel();
-    let _control_subscription = Subscription::start(&control, Channel::Control, sender.clone())?;
-    let _auth_subscription = Subscription::start(&auth, Channel::Auth, sender)?;
-
+    let link = SetupLink::open(scale)?;
+    let SetupLink {
+        control,
+        auth,
+        replies,
+        service,
+        ..
+    } = &link;
     let mtu = service.Session()?.MaxPduSize()?;
-    write_packet(&control, &REQUEST_DEVICE_INFO)?;
-    let info = receive_block(&auth, &replies, DEVICE_INFO_OR_ID, "device information")?;
-    // This is the unregistered, no-OOB capability reply observed on the ms113.
-    if info != [2, 0, 0, 0] {
+    let profile = link.read_profile()?;
+    if !profile.supports_registration() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "the scale reported a different setup capability profile",
+            format!(
+                "Connected to S200 {}. Bluetooth setup expected a 4- or 24-byte reply starting with 02 00 00 00. Received {profile}.",
+                scale.address()
+            ),
         ));
     }
 
     let exchange = RegistrationKeys::generate();
-    write_packet(&control, &START_KEY_EXCHANGE)?;
+    write_packet(control, &START_KEY_EXCHANGE)?;
     transmit_block(
-        &auth,
-        &replies,
+        auth,
+        replies,
         mtu,
         PUBLIC_KEY_BLOCK,
         exchange.public_key(),
         "app public key",
     )?;
-    require_ack(&replies, FRAGMENTS_RECEIVED, "app public key")?;
-    let peer = receive_block(&auth, &replies, PUBLIC_KEY_BLOCK, "scale public key")?;
+    require_ack(replies, FRAGMENTS_RECEIVED, "app public key")?;
+    let peer = receive_block(auth, replies, PUBLIC_KEY_BLOCK, "scale public key")?;
     let registration = exchange.finish(&peer)?;
     let (proof, state) = authorize(&registration)?;
 
-    write_packet(&control, &CONFIRM_REGISTRATION)?;
+    write_packet(control, &CONFIRM_REGISTRATION)?;
     transmit_block(
-        &auth,
-        &replies,
+        auth,
+        replies,
         mtu,
         DEVICE_INFO_OR_ID,
         &proof.encrypted_id,
         "encrypted device ID",
     )?;
-    require_ack(&replies, FRAGMENTS_RECEIVED, "encrypted device ID")?;
+    require_ack(replies, FRAGMENTS_RECEIVED, "encrypted device ID")?;
 
     transmit_block(
-        &auth,
-        &replies,
+        auth,
+        replies,
         mtu,
         CERTIFICATE_BLOCK,
         &proof.certificate,
         "registration certificate",
     )?;
-    let reply = match await_reply(&replies, Some(FRAGMENTS_RECEIVED)) {
+    let reply = match await_reply(replies, Some(FRAGMENTS_RECEIVED)) {
         Response::Control(reply) => Ok(reply),
-        Response::Acknowledged => match await_reply(&replies, None) {
+        Response::Acknowledged => match await_reply(replies, None) {
             Response::Control(reply) => Ok(reply),
             Response::TransferFailed => Err(transfer_error("registration certificate")),
             Response::TimedOut | Response::Acknowledged => {
@@ -474,9 +557,26 @@ impl Drop for Subscription {
 
 #[cfg(test)]
 mod tests {
-    use super::{CERTIFICATE_BLOCK, PUBLIC_KEY_BLOCK, block_packets};
+    use super::{CERTIFICATE_BLOCK, PUBLIC_KEY_BLOCK, SetupProfile, block_packets};
 
     const CERTIFICATE_PAYLOAD: &[u8] = &[0x30; 329];
+
+    #[test]
+    fn accepts_both_observed_device_info_formats_with_the_supported_header() {
+        assert!(SetupProfile(vec![2, 0, 0, 0]).supports_registration());
+
+        let mut extended = vec![2, 0, 0, 0];
+        extended.extend_from_slice(&[0xff; 20]);
+        assert!(SetupProfile(extended.clone()).supports_registration());
+        assert_eq!(
+            SetupProfile(extended.clone()).to_string(),
+            "02 00 00 00 … (24 bytes total)"
+        );
+        extended[0] = 3;
+        assert!(!SetupProfile(extended).supports_registration());
+        assert!(!SetupProfile(vec![2, 0, 0, 1]).supports_registration());
+        assert!(!SetupProfile(vec![2, 0, 0, 0, 0]).supports_registration());
+    }
 
     #[test]
     fn frames_the_entire_certificate_at_small_mtu() {

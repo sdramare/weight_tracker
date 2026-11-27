@@ -15,7 +15,9 @@ use super::{
     Apartment, Scale, check_cancellation, check_service_status, discovery, open_scale_device,
 };
 
-pub use certificate_transfer::{SetupCertificateReply, send_setup_test_certificate};
+pub use certificate_transfer::{
+    SetupCertificateReply, SetupProfile, probe_setup_profile, send_setup_test_certificate,
+};
 pub use connected_weight::{
     ConnectedWeightEvent, listen_for_connected_weight, watch_connected_weights,
 };

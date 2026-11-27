@@ -1,11 +1,12 @@
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --setup-test-cert | --check-setup] [--seconds <1-60>]\n\
+const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --setup-profile | --setup-test-cert | --check-setup] [--seconds <1-60>]\n\
     blt_unlock --register-scale [--seconds <1-60>]\n\
     blt_unlock --xiaomi-sign-in | --xiaomi-check-cloud\n\
     Find a Xiaomi Smart Scale S200 and connect over Bluetooth Low Energy.\n\
     Use --weight to read from an S200 using its saved setup token or S200_BINDKEY.\n\
     Use --setup-info to inspect the setup information in S200 broadcasts.\n\
+    Use --setup-profile to read the unpaired S200's Bluetooth setup profile without signing in.\n\
     Use --setup-test-cert to try Standard Auth setup with a local test certificate.\n\
     Use --check-setup for Bluetooth and Xiaomi account checks in one run.\n\
     Use --register-scale to sign in once and register an unregistered S200 ms113.\n\
@@ -18,6 +19,7 @@ enum Command {
     Services,
     Weight,
     SetupInfo,
+    SetupProfile,
     SetupTestCertificate,
     SetupCheck,
     RegisterScale,
@@ -53,6 +55,7 @@ fn main() -> ExitCode {
             Some("--scale") if command.is_none() => command = Some(Command::Services),
             Some("--weight") if command.is_none() => command = Some(Command::Weight),
             Some("--setup-info") if command.is_none() => command = Some(Command::SetupInfo),
+            Some("--setup-profile") if command.is_none() => command = Some(Command::SetupProfile),
             Some("--setup-test-cert") if command.is_none() => {
                 command = Some(Command::SetupTestCertificate)
             }
@@ -100,6 +103,10 @@ fn run(seconds: u64, command: Command) -> ExitCode {
         Command::SetupInfo => (
             show_setup_info(duration),
             "Scale setup information unavailable",
+        ),
+        Command::SetupProfile => (
+            show_setup_profile(duration),
+            "Bluetooth setup profile unavailable",
         ),
         Command::SetupTestCertificate => (
             show_setup_certificate_test(duration),
@@ -305,6 +312,26 @@ fn show_setup_info(duration: std::time::Duration) -> std::io::Result<()> {
             io::ErrorKind::NotFound,
             "No S200 MiBeacon setup information arrived.",
         ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn show_setup_profile(duration: std::time::Duration) -> std::io::Result<()> {
+    println!(
+        "Scanning for an unpaired S200 for up to {} seconds. Step on the scale to wake it.",
+        duration.as_secs()
+    );
+    let scale = xiaomi_s200::find_registration_scale(duration)?;
+    if let Some(info) = scale.setup_info() {
+        println!("{}  {info}", scale.address());
+    }
+    let profile = xiaomi_s200::probe_setup_profile(&scale)?;
+    println!("Bluetooth setup profile: {profile}");
+    if profile.supports_registration() {
+        println!("This profile supports the app's registration flow.");
+    } else {
+        println!("Registration expects a 4- or 24-byte reply starting with 02 00 00 00.");
     }
     Ok(())
 }
