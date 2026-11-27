@@ -145,8 +145,9 @@ impl SetupAttempt {
             Some(RegistrationStep::BluetoothKeyExchange) => {
                 "Connecting to the scale over Bluetooth…"
             }
-            Some(RegistrationStep::AllocateDeviceId) => "Requesting a device ID from Xiaomi…",
-            Some(RegistrationStep::ReuseDeviceId) => "Using the device ID stored on the scale…",
+            Some(RegistrationStep::AllocateDeviceId) => {
+                "Registering the Bluetooth token with Xiaomi…"
+            }
             Some(RegistrationStep::RequestCertificate) => {
                 "Requesting Xiaomi’s signed setup authorization…"
             }

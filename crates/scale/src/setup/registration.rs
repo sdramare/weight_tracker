@@ -17,7 +17,6 @@ pub enum RegistrationStep {
     EuropeApi,
     ScaleDiscovery,
     BluetoothKeyExchange,
-    ReuseDeviceId,
     AllocateDeviceId,
     RequestCertificate,
     FinishSetup,
@@ -30,8 +29,7 @@ impl fmt::Display for RegistrationStep {
             Self::EuropeApi => "Xiaomi Europe API",
             Self::ScaleDiscovery => "Find the S200 over Bluetooth",
             Self::BluetoothKeyExchange => "Standard Auth Bluetooth key exchange",
-            Self::ReuseDeviceId => "Use the Xiaomi device ID reported by the scale",
-            Self::AllocateDeviceId => "Allocate the Xiaomi BLE device ID",
+            Self::AllocateDeviceId => "Apply for the Xiaomi BLE device ID",
             Self::RequestCertificate => "Request Xiaomi's signed Bluetooth authorization",
             Self::FinishSetup => "Send the Xiaomi certificate and wait for the scale to confirm",
         })
@@ -94,7 +92,7 @@ pub fn register_scale_europe_while(
     use RegistrationEvent::{CredentialsSaved, Passed, Started};
     use RegistrationStep::{
         AllocateDeviceId, BluetoothKeyExchange, BrowserSignIn, EuropeApi, FinishSetup,
-        RequestCertificate, ReuseDeviceId, ScaleDiscovery,
+        RequestCertificate, ScaleDiscovery,
     };
 
     let session = run_step(&mut report, BrowserSignIn, || {
@@ -109,19 +107,19 @@ pub fn register_scale_europe_while(
 
     report(Started(BluetoothKeyExchange));
     check_cancellation(&keep_going)?;
+    let mut previous_device = None;
     let (reply, credentials) = register_with(&scale, |registration, stored_device_id| {
         check_cancellation(&keep_going)?;
         report(Passed(BluetoothKeyExchange));
         let token = registration.login_token_hex();
         let bind_key = registration.bind_key_hex();
-        let id_step = if stored_device_id.is_some() {
-            ReuseDeviceId
-        } else {
-            AllocateDeviceId
-        };
-        let device_id = run_step(&mut report, id_step, || {
-            stored_device_id.map_or_else(|| session.allocate_device_id(address, &token), Ok)
+        let device_id = run_step(&mut report, AllocateDeviceId, || {
+            session.allocate_device_id(address, &token, stored_device_id.as_ref())
         })?;
+        previous_device = stored_device_id.map(|previous| {
+            let different_id = previous.as_str() != device_id.as_str();
+            (previous, different_id)
+        });
         let authorization = run_step(&mut report, RequestCertificate, || {
             session.authorize_standard_registration(&device_id, &token, &bind_key)
         })?;
@@ -142,9 +140,27 @@ pub fn register_scale_europe_while(
     match reply {
         SetupCertificateReply::RegistrationSucceeded => {}
         SetupCertificateReply::RegistrationFailed => {
-            return Err(io::Error::other(
+            let mut message = String::from(
                 "Xiaomi issued the setup authorization, but the scale rejected it (Bluetooth code 0x12). The scale gave no reason. The app marked this attempt’s keys as rejected.",
-            ));
+            );
+            if let Some((device_id, different_id)) = previous_device {
+                if different_id {
+                    message.push_str(
+                        " Xiaomi allocated a different device ID from the one the scale reported.",
+                    );
+                }
+                let detail = match session.lists_device(&device_id) {
+                    Ok(true) => {
+                        " Xiaomi’s device list still shows the scale’s previous ID on this account."
+                    }
+                    Ok(false) => " Xiaomi’s device list did not return the ID the scale reported.",
+                    Err(_) => {
+                        " The app could not check the ID the scale reported in Xiaomi’s device list."
+                    }
+                };
+                message.push_str(detail);
+            }
+            return Err(io::Error::other(message));
         }
         SetupCertificateReply::AlreadyRegistered => {
             return Err(io::Error::new(

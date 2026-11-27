@@ -10,6 +10,7 @@ use crate::BluetoothAddress;
 const S200_MS113_MODEL: &str = "xiaomi.scales.ms113";
 const ALLOCATE_DEVICE_ID_PATH: &str = "/device/bltapplydid";
 const STANDARD_BIND_PATH: &str = "/v2/device/ble_standard_bind";
+const DEVICE_LIST_PATH: &str = "/v2/home/device_list_page";
 
 pub(crate) struct CloudDeviceId(String);
 
@@ -99,10 +100,9 @@ impl EuropeSession {
         &self,
         address: BluetoothAddress,
         login_token_hex: &str,
+        stored_device_id: Option<&CloudDeviceId>,
     ) -> io::Result<CloudDeviceId> {
-        let data = format!(
-            r#"{{"mac":"{address}","model":"{S200_MS113_MODEL}","token":"{login_token_hex}"}}"#
-        );
+        let data = device_id_request(address, login_token_hex, stored_device_id);
         let reply = self.request(ALLOCATE_DEVICE_ID_PATH, &data)?;
         CloudDeviceId::from_reply(&reply)
     }
@@ -127,6 +127,55 @@ impl EuropeSession {
         let reply = self.request(STANDARD_BIND_PATH, &data)?;
         CloudAuthorization::from_reply(&reply)
     }
+
+    pub(crate) fn lists_device(&self, device_id: &CloudDeviceId) -> io::Result<bool> {
+        let data = format!(
+            r#"{{"limit":200,"get_split_device":true,"get_third_device":true,"dids":["{device_id}"]}}"#,
+            device_id = device_id.as_str(),
+        );
+        let result = self.request(DEVICE_LIST_PATH, &data)?;
+        device_list_contains(&result, device_id)
+    }
+}
+
+fn device_id_request(
+    address: BluetoothAddress,
+    login_token_hex: &str,
+    stored_device_id: Option<&CloudDeviceId>,
+) -> String {
+    // Xiaomi Home includes the old DID in this request when the scale supplies one.
+    let stored_field = stored_device_id
+        .map(|id| format!(r#","did":"{}""#, id.as_str()))
+        .unwrap_or_default();
+    format!(
+        r#"{{"mac":"{address}","model":"{S200_MS113_MODEL}","token":"{login_token_hex}"{stored_field}}}"#,
+    )
+}
+
+fn device_list_contains(result: &JsonValue, device_id: &CloudDeviceId) -> io::Result<bool> {
+    let result = result
+        .GetObject()
+        .map_err(|_| invalid_reply("Xiaomi returned an invalid device list"))?;
+    let entries = result
+        .GetNamedArray(&HSTRING::from("list"))
+        .map_err(|_| invalid_reply("Xiaomi did not return a device list"))?;
+    let did_key = HSTRING::from("did");
+    for entry in entries {
+        let id = entry
+            .GetObject()
+            .and_then(|entry| entry.GetNamedString(&did_key))
+            .map_err(|_| invalid_reply("Xiaomi returned an entry without a device ID"))?;
+        if id == device_id.as_str() {
+            return Ok(true);
+        }
+    }
+    if result
+        .GetNamedBoolean(&HSTRING::from("has_more"))
+        .unwrap_or(false)
+    {
+        return Err(invalid_reply("Xiaomi returned an incomplete device list"));
+    }
+    Ok(false)
 }
 
 fn authorization_bytes(reply: &JsonObject, key: &str) -> io::Result<Vec<u8>> {
@@ -151,8 +200,8 @@ mod tests {
     use windows::Data::Json::JsonValue;
     use windows::core::HSTRING;
 
-    use super::{CloudAuthorization, CloudDeviceId};
-    use crate::Apartment;
+    use super::{CloudAuthorization, CloudDeviceId, device_id_request, device_list_contains};
+    use crate::{Apartment, BluetoothAddress};
 
     #[test]
     fn parses_the_device_id_and_authorization_from_xiaomi() {
@@ -173,5 +222,35 @@ mod tests {
         assert_eq!(grant.utc, 1795700991);
         let denied = JsonValue::Parse(&HSTRING::from(r#"{"success":false}"#)).unwrap();
         assert!(CloudAuthorization::from_reply(&denied).is_err());
+    }
+
+    #[test]
+    fn checks_the_exact_stored_device_id_in_a_complete_cloud_list() {
+        let _apartment = Apartment::initialize().unwrap();
+        let stored = CloudDeviceId::parse("blt.4.example000000").unwrap();
+        let fixtures = [
+            (r#"{"list":[{"did":"blt.4.example000000"}]}"#, Some(true)),
+            (r#"{"list":[{"did":"blt.4.example000001"}]}"#, Some(false)),
+            (r#"{"list":[],"has_more":true}"#, None),
+            (r#"{}"#, None),
+        ];
+        for (json, expected) in fixtures {
+            let result = JsonValue::Parse(&HSTRING::from(json)).unwrap();
+            assert_eq!(device_list_contains(&result, &stored).ok(), expected);
+        }
+    }
+
+    #[test]
+    fn allocates_the_fresh_token_with_the_stored_id_when_present() {
+        let address = BluetoothAddress(1);
+        let stored = CloudDeviceId::parse("blt.4.example000000").unwrap();
+        assert_eq!(
+            device_id_request(address, "test-token", None),
+            r#"{"mac":"00:00:00:00:00:01","model":"xiaomi.scales.ms113","token":"test-token"}"#,
+        );
+        assert_eq!(
+            device_id_request(address, "test-token", Some(&stored)),
+            r#"{"mac":"00:00:00:00:00:01","model":"xiaomi.scales.ms113","token":"test-token","did":"blt.4.example000000"}"#,
+        );
     }
 }

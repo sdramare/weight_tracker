@@ -110,7 +110,7 @@ impl SignedRequest {
             Some(0) => json
                 .GetNamedValue(&HSTRING::from("result"))
                 .map_err(|_| io::Error::other(message)),
-            Some(code) if code != 0 => Err(cloud_rejection(code)),
+            Some(code) => Err(cloud_rejection(&json, code)),
             _ => Err(io::Error::other(message)),
         }
     }
@@ -125,10 +125,21 @@ fn cloud_code(json: &JsonObject) -> Option<i32> {
         .ok()
 }
 
-fn cloud_rejection(code: i32) -> io::Error {
-    io::Error::other(format!(
-        "Xiaomi's Europe API rejected the request (code {code})"
-    ))
+fn cloud_rejection(json: &JsonObject, code: i32) -> io::Error {
+    let message = format!("Xiaomi's Europe API rejected the request (code {code})");
+    let detail = ["message", "description"]
+        .into_iter()
+        .filter_map(|field| json.GetNamedString(&HSTRING::from(field)).ok())
+        .map(|value| value.to_string_lossy())
+        .find(|value| {
+            !value.trim().is_empty()
+                && value.chars().count() <= 160
+                && !value.chars().any(char::is_control)
+        });
+    io::Error::other(match detail {
+        Some(detail) => format!("{message}. Xiaomi reported “{}”.", detail.trim()),
+        None => message,
+    })
 }
 
 fn decode_base64(value: &str, message: &'static str) -> io::Result<Vec<u8>> {
@@ -257,7 +268,14 @@ mod tests {
                 .result(b"FcmPXxOeYHtFd8nP5iiNIy4UWs0wUqDIo8orcO6R6g==")
                 .is_ok()
         );
-        let rejected = request.result(br#"{"code":3}"#).unwrap_err();
-        assert!(rejected.to_string().contains("code 3"));
+        let rejected = request
+            .result(br#"{"code":-6,"message":"Example cloud rejection"}"#)
+            .unwrap_err();
+        assert!(rejected.to_string().contains("code -6"));
+        assert!(rejected.to_string().contains("Example cloud rejection"));
+        let multiline = request
+            .result(br#"{"code":3,"message":"bad\nmessage"}"#)
+            .unwrap_err();
+        assert!(!multiline.to_string().contains('\n'));
     }
 }
