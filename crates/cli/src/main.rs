@@ -204,9 +204,21 @@ fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
     use std::ops::ControlFlow;
     use xiaomi_s200::{ConnectedWeightEvent, SavedScaleLogins, WeightReading};
 
-    let logins = SavedScaleLogins::load_default()?;
+    let logins = match SavedScaleLogins::load_default() {
+        Ok(logins) => logins,
+        Err(error) => {
+            eprintln!("S200 credentials: {error}");
+            SavedScaleLogins::default()
+        }
+    };
+    for warning in logins.warnings() {
+        eprintln!("S200 credentials: {warning}");
+    }
     let bind_key = match xiaomi_s200::ScaleBindKey::from_environment() {
-        Err(_) if !logins.is_empty() => None,
+        Err(error) if !logins.is_empty() => {
+            eprintln!("S200 bind key: {error}");
+            None
+        }
         result => result?,
     };
     if logins.is_empty() && bind_key.is_none() {
@@ -222,12 +234,12 @@ fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
     let mut target = None;
     let mut reading = None;
     let on_scale = |scale: &xiaomi_s200::Scale| {
-        if scale.is_connectable() && logins.token_for(scale).is_some() {
-            target = Some(scale.clone());
-            return ControlFlow::Break(());
-        }
         if let Some(weight) = scale.weight() {
             reading = Some((scale.address(), weight));
+            return ControlFlow::Break(());
+        }
+        if scale.is_connectable() && logins.token_for(scale).is_some() {
+            target = Some(scale.clone());
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
@@ -307,7 +319,7 @@ fn run(_seconds: u64, _command: Command) -> ExitCode {
 fn register_scale(duration: std::time::Duration) -> std::io::Result<()> {
     use xiaomi_s200::{RegistrationEvent, RegistrationStep};
 
-    let credentials = std::env::current_dir()?.join("target/s200-registration");
+    let credentials = xiaomi_s200::default_registration_directory()?;
     let scale = xiaomi_s200::register_scale_europe(
         duration,
         &credentials,
@@ -324,18 +336,21 @@ fn register_scale(duration: std::time::Duration) -> std::io::Result<()> {
             }
             RegistrationEvent::Passed(step) => println!("[PASS] {step}"),
             RegistrationEvent::CredentialsSaved(path) => {
-                println!("S200 keys saved locally in {}.", path.display());
+                println!("Pending S200 keys saved locally in {}.", path.display());
             }
         },
     )?;
     println!("Scale setup complete for {}.", scale.address());
+    println!(
+        "Confirmed keys saved in {}.",
+        scale.credentials_file().display()
+    );
     Ok(())
 }
 
 #[cfg(windows)]
 fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result<()> {
     use std::io;
-    use std::path::Path;
     use xiaomi_s200::SetupCertificateReply;
 
     println!(
@@ -347,8 +362,8 @@ fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result
         println!("{info}");
     }
     println!("Starting Standard Auth setup with {}.", scale.address());
-    let credentials_directory = Path::new("target/s200-setup-test");
-    let reply = xiaomi_s200::send_setup_test_certificate(&scale, credentials_directory)?;
+    let credentials_directory = xiaomi_s200::default_registration_directory()?;
+    let reply = xiaomi_s200::send_setup_test_certificate(&scale, &credentials_directory)?;
     match reply {
         SetupCertificateReply::RegistrationSucceeded => {
             println!(
@@ -358,7 +373,10 @@ fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result
             Ok(())
         }
         SetupCertificateReply::ReceivedWithoutRegistrationResult => {
-            println!("{reply}.");
+            println!(
+                "{reply}. Pending keys saved under {}.",
+                credentials_directory.display()
+            );
             Ok(())
         }
         SetupCertificateReply::RegistrationFailed | SetupCertificateReply::AlreadyRegistered => {

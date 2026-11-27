@@ -1,10 +1,12 @@
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::io;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
 use xiaomi_s200::{
@@ -12,10 +14,11 @@ use xiaomi_s200::{
     Weight, WeightReading, watch_connected_weights, watch_scales,
 };
 
-use super::history::{History, WeightEntry};
+use super::history::{HistoryMonitor, WeightEntry};
 use super::{tray, weight_plot};
 
 const RETRY_DELAY: Duration = Duration::from_secs(2);
+const HISTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 243);
 const INK: Color32 = Color32::from_rgb(19, 43, 38);
 const MUTED: Color32 = Color32::from_rgb(69, 93, 84);
@@ -54,8 +57,7 @@ enum MonitorEvent {
     Status(MonitorStatus),
     Weight(BluetoothAddress, WeightReading),
     HistoryLoaded(Vec<WeightEntry>),
-    WeightRecorded(WeightEntry),
-    HistoryError(String),
+    HistoryError(Option<String>),
 }
 
 struct ScaleRow {
@@ -69,7 +71,7 @@ struct ScaleApp {
     events: Option<Receiver<MonitorEvent>>,
     listening: Arc<AtomicBool>,
     status: MonitorStatus,
-    weight_hint: Option<String>,
+    weight_hints: Vec<String>,
     history: Vec<WeightEntry>,
     history_error: Option<String>,
     group_by: weight_plot::GroupBy,
@@ -92,15 +94,23 @@ impl ScaleApp {
         let (sender, receiver) = mpsc::channel();
         let listening = Arc::new(AtomicBool::new(true));
         let logins = SavedScaleLogins::load_default();
-        let bind_key = ScaleBindKey::from_environment();
-        let weight_hint = match (&logins, &bind_key) {
-            (Ok(logins), _) if !logins.is_empty() => None,
-            (_, Ok(Some(_))) => None,
-            (Err(error), _) | (_, Err(error)) => Some(error.to_string()),
-            _ => Some("Register your S200 to show live weight.".into()),
+        let mut weight_hints = match &logins {
+            Ok(logins) => logins
+                .warnings()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            Err(error) => vec![error.to_string()],
         };
         let logins = logins.unwrap_or_default();
+        let bind_key = ScaleBindKey::from_environment();
+        if let Err(error) = &bind_key {
+            weight_hints.push(error.to_string());
+        }
         let bind_key = bind_key.ok().flatten();
+        if logins.is_empty() && bind_key.is_none() {
+            weight_hints.push("Register your S200 to show live weight.".into());
+        }
         let worker_listening = Arc::clone(&listening);
         let context = context.clone();
         let worker = thread::Builder::new()
@@ -123,7 +133,7 @@ impl ScaleApp {
             events,
             listening,
             status,
-            weight_hint,
+            weight_hints,
             history: Vec::new(),
             history_error: None,
             group_by: weight_plot::GroupBy::Day,
@@ -176,12 +186,11 @@ impl ScaleApp {
                         }
                     }
                 }
-                Ok(MonitorEvent::HistoryLoaded(entries)) => self.history = entries,
-                Ok(MonitorEvent::WeightRecorded(entry)) => {
-                    self.history.push(entry);
+                Ok(MonitorEvent::HistoryLoaded(entries)) => {
+                    self.history = entries;
                     self.history_error = None;
                 }
-                Ok(MonitorEvent::HistoryError(error)) => self.history_error = Some(error),
+                Ok(MonitorEvent::HistoryError(error)) => self.history_error = error,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.events = None;
@@ -230,7 +239,6 @@ fn monitor_scales(
     sender: &Sender<MonitorEvent>,
     context: &egui::Context,
 ) {
-    let keep_listening = || listening.load(Ordering::Relaxed);
     let post = |event| {
         if sender.send(event).is_err() {
             return ControlFlow::Break(());
@@ -238,33 +246,40 @@ fn monitor_scales(
         context.request_repaint();
         ControlFlow::Continue(())
     };
-    let history = match History::open().and_then(|history| {
-        let entries = history.entries().map_err(std::io::Error::other)?;
-        Ok((history, entries))
-    }) {
-        Ok((history, entries)) => {
-            if post(MonitorEvent::HistoryLoaded(entries)).is_break() {
-                return;
+    let history = RefCell::new(HistoryMonitor::default());
+    let next_history_refresh = Cell::new(Instant::now());
+    let history_error = RefCell::new(None);
+    let report_history = |result: io::Result<Option<Vec<WeightEntry>>>| {
+        let mut previous_error = history_error.borrow_mut();
+        match result {
+            Ok(Some(entries)) => {
+                *previous_error = None;
+                post(MonitorEvent::HistoryLoaded(entries))
             }
-            Some(history)
-        }
-        Err(error) => {
-            if post(MonitorEvent::HistoryError(error.to_string())).is_break() {
-                return;
+            Ok(None) if previous_error.take().is_some() => post(MonitorEvent::HistoryError(None)),
+            Ok(None) => ControlFlow::Continue(()),
+            Err(error) => {
+                let error = error.to_string();
+                if previous_error.as_ref() == Some(&error) {
+                    return ControlFlow::Continue(());
+                }
+                *previous_error = Some(error.clone());
+                post(MonitorEvent::HistoryError(Some(error)))
             }
-            None
         }
     };
-    let record_weight = |weight| {
-        if let Some(history) = &history {
-            match history.record(weight) {
-                Ok(Some(entry)) => return post(MonitorEvent::WeightRecorded(entry)),
-                Err(error) => return post(MonitorEvent::HistoryError(error.to_string())),
-                Ok(None) => {}
-            }
+    let keep_listening = || {
+        if !listening.load(Ordering::Relaxed) {
+            return false;
         }
-        ControlFlow::Continue(())
+        let now = Instant::now();
+        if now < next_history_refresh.get() {
+            return true;
+        }
+        next_history_refresh.set(now + HISTORY_REFRESH_INTERVAL);
+        report_history(history.borrow_mut().refresh()).is_continue()
     };
+    let record_weight = |weight| report_history(history.borrow_mut().record(weight));
     while keep_listening() && post(MonitorEvent::Status(MonitorStatus::Listening)).is_continue() {
         let mut target = None;
         let result =
@@ -325,7 +340,7 @@ impl eframe::App for ScaleApp {
                 ui.label(RichText::new(MODEL_NAME.to_string()).color(MUTED));
                 ui.add_space(15.0);
                 self.status_line(ui);
-                if let Some(hint) = &self.weight_hint {
+                for hint in &self.weight_hints {
                     ui.label(RichText::new(hint).color(MUTED));
                 }
                 if let Some(error) = &self.tray_error {
@@ -345,7 +360,7 @@ impl eframe::App for ScaleApp {
                 ui.add_space(12.0);
                 egui::Frame::new()
                     .fill(Color32::WHITE)
-                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
                     .corner_radius(10)
                     .inner_margin(14)
                     .show(ui, |ui| {
@@ -365,7 +380,7 @@ fn scale_row(ui: &mut egui::Ui, row: &ScaleRow) {
     let scale = &row.scale;
     egui::Frame::new()
         .fill(Color32::WHITE)
-        .stroke(egui::Stroke::new(1.0, BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, BORDER))
         .corner_radius(10)
         .inner_margin(12)
         .show(ui, |ui| {

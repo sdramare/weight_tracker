@@ -266,8 +266,10 @@
       </figure>
       <h3>Choose the saved token</h3>
       <ol class="steps">
-        <li>Load regular files matching <code>s200-*.keys</code> in <code>target/s200-registration</code> under the working directory. If that yields no tokens, try the same directory under the executable’s nearest <code>target</code> ancestor. Each <code>login_token</code> decodes from 24 hex digits to 12 bytes.</li>
-        <li>For a connectable scale, use the newest file by modification time that specifies its Bluetooth address. If there is no address match, use a single older file without an address only for an advertised ms113. The terminal can also stop on a decoded broadcast. If both options arrive together, the terminal selects the connected path.</li>
+        <li>Load regular <code>s200-*.keys</code> files from <code>%LOCALAPPDATA%/blt_unlock/s200-registration</code>. Also read valid entries from older <code>target/s200-registration</code> directories under the working directory and beside the build. Copy those entries to the per-user store and leave the originals in place. Older test files in <code>target/s200-setup-test</code> are copied into the store’s <code>recovery</code> subfolder for manual recovery.</li>
+        <li>Decode each <code>login_token</code> from 24 hex digits to 12 bytes. Report unreadable or malformed files by path and keep the other tokens. A valid <code>S200_BINDKEY</code> works independently of the saved files.</li>
+        <li>Skip connected login when the scale advertises that it is unregistered. Prefer the newest address-matched confirmed file over older-format files. Consider a pending file only when the scale advertises that it is registered and the pending file is newer than the other selected file. With no address match, a single distinct older token without an address is a fallback for an advertised ms113.</li>
+        <li>If the terminal has decoded an authenticated broadcast weight, it displays that weight immediately. It opens a GATT connection for a connectable scale with an eligible saved token when discovery supplies no weight.</li>
       </ol>
       <h3>Authenticate the Bluetooth session</h3>
       <ol class="steps">
@@ -360,7 +362,7 @@
       </figure>
       <h3>Watch and recover</h3>
       <ol class="steps">
-        <li>Start a background worker and open SQLite. Load existing rows in timestamp order, then scan continuously. The worker checks for cancellation in 250 ms intervals while waiting for advertisements.</li>
+        <li>Start a background worker, try to open SQLite and load rows in timestamp order, and scan continuously. The worker checks for cancellation in 250 ms intervals while waiting for advertisements.</li>
         <li>List discovered scales by address. Save eligible broadcast readings as they arrive. On a connectable scale with a saved token, stop the watcher and open a connected weight session.</li>
         <li>Show live and settled values as the worker reports them. On disconnect or inactivity, restart scanning and keep the last settled weight visible. After a scan or connection error, display the error and retry after two seconds.</li>
         <li>On Windows <code>WM_SIZE</code> with <code>SIZE_MINIMIZED</code>, queue a hide request. When it runs, hide only if the window is still minimized and visible. The worker continues listening. Double-click the tray icon to restore the window, or right-click it for <strong>Show weight window</strong> and <strong>Quit</strong>. Closing the window also stops monitoring. If the tray cannot start, Windows minimizes the window normally and the app reports a tray error.</li>
@@ -370,6 +372,7 @@
       <ol class="steps">
         <li>Take the PC’s current time as Unix epoch milliseconds and store it as the primary key, paired with the positive integer weight in hundredths of a kilogram.</li>
         <li>Insert only when the table has no row with <code>measured_at_ms ≥ current_ms − 86,400,000</code>. One SQLite statement makes the check and insert atomic. Exactly 24 hours is too soon.</li>
+        <li>Retry a failed database open or load during monitoring, including on later weigh-ins. Check SQLite’s <code>data_version</code> roughly every two seconds to reload rows written by another window. Refresh the chart after a local insert, and clear the error once the database responds again.</li>
       </ol>
       <h3>Group the chart and calculate the forecast</h3>
       <ol class="steps">
@@ -382,7 +385,7 @@
         <code>slope = Σ((t − mean(t)) × (w − mean(w))) / Σ((t − mean(t))²)</code>
         <code>forecast kg = latest plotted kg + 30 × slope</code>
       </div>
-      <p class="source"><a href="../crates/gui/src/desktop.rs">Desktop worker</a> · <a href="../crates/gui/src/tray.rs">Tray lifecycle</a> · <a href="../crates/gui/src/history.rs">SQLite rule</a> · <a href="../crates/gui/src/weight_plot.rs">Chart and forecast</a> · <a href="https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-size">Windows minimize message</a></p>
+      <p class="source"><a href="../crates/gui/src/desktop.rs">Desktop worker</a> · <a href="../crates/gui/src/tray.rs">Tray lifecycle</a> · <a href="../crates/gui/src/history.rs">SQLite history code</a> · <a href="../crates/gui/src/weight_plot.rs">Chart and forecast</a> · <a href="https://sqlite.org/pragma.html#pragma_data_version">SQLite change detection</a> · <a href="https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-size">Windows minimize message</a></p>
     </section>
 
     <section class="panel" aria-labelledby="registration-heading">
@@ -431,7 +434,6 @@
       <h3>Obtain Xiaomi’s authorization</h3>
       <ol class="steps">
         <li>Send the Bluetooth address as <code>mac</code>, <code>model=xiaomi.scales.ms113</code>, and hex <code>token</code> to <code>/device/bltapplydid</code>. Accept the returned device ID from a string or the <code>did</code> property. It must contain 1–64 ASCII letters, digits, periods, hyphens, or underscores.</li>
-        <li>Create and sync a new <code>s200-*.keys</code> file under <code>target/s200-registration</code> with the login token, bind key, and Bluetooth address. The app retains it when the later registration result is uncertain.</li>
         <li>Send <code>did</code> and the same <code>token</code> to <code>/v2/device/ble_standard_bind</code>. Set the <code>bind_key</code> property and <code>beacon_key</code> to the hex bind key. Send the <code>smac</code> property as an empty string.</li>
         <li>Require <code>success=true</code>. Decode the certificate (<code>cloud_cert</code>) and signature (<code>cloud_sign</code>) as Base64 or Base64URL, with or without padding. Check that the certificate is at most 4,096 bytes and starts with the DER SEQUENCE type byte (<code>30</code>). Require a 64-byte signature and a nonzero unsigned 32-bit timestamp (<code>utc</code>).</li>
       </ol>
@@ -439,15 +441,16 @@
       <ol class="steps">
         <li>Make an 88-byte plaintext. Take the last up to 20 bytes of the DID, right-align them in bytes <code>[0,20)</code>, and pad the left with zeroes. Append the 64-byte signature and the four-byte little-endian UTC.</li>
         <li>Encrypt it with AES-128-CCM using the identity key. For this message the protocol specifies the fixed nonce <code>10 11 12 13 14 15 16 17 18 19 1A 1B</code> and authenticates the ASCII label <code>devID</code> alongside the ciphertext. Append the four-byte authentication tag.</li>
+        <li>Before sending the proof, create and sync a <code>.pending.keys</code> file in <code>%LOCALAPPDATA%/blt_unlock/s200-registration</code> with the login token, bind key, and Bluetooth address. The file stays available if the Bluetooth session ends before the result arrives.</li>
         <li><strong>Request registration confirmation.</strong> Write the confirmation command (<code>13 00 00 00</code>) to the control characteristic. Send the encrypted device identity in authentication block <code>00</code> and wait for its acknowledgment. Then send the certificate in authentication block <code>07</code> using the <a href="#certificate-fragment-limit">certificate fragment limit</a>.</li>
       </ol>
       <div class="fields" role="region" aria-label="Registration outcomes" tabindex="0">
         <table>
           <thead><tr><th scope="col">Scale response</th><th scope="col">Registration outcome</th></tr></thead>
           <tbody>
-            <tr><th scope="row">Registration succeeded<br><code>11 00 00 00</code></th><td>The CLI reports the scale’s address and completes setup.</td></tr>
-            <tr><th scope="row">Registration failed<br><code>12 00 00 00</code></th><td>The scale rejected registration.</td></tr>
-            <tr><th scope="row">Already registered<br><code>E1 00 00 00</code></th><td>The scale reports an existing registration.</td></tr>
+            <tr><th scope="row">Registration succeeded<br><code>11 00 00 00</code></th><td>Rename the file to <code>.confirmed.keys</code>. The CLI prints the scale’s address and the confirmed file path.</td></tr>
+            <tr><th scope="row">Registration failed<br><code>12 00 00 00</code></th><td>The scale rejected registration. Rename to <code>.rejected.keys</code> so readers skip this attempt.</td></tr>
+            <tr><th scope="row">Already registered<br><code>E1 00 00 00</code></th><td>The scale reports an existing registration. Mark the new attempt <code>.rejected.keys</code> and keep any previously saved registration.</td></tr>
             <tr><th scope="row">Transfer acknowledgment only</th><td>Wait another five seconds for a control result. If none arrives, full registration reports an incomplete result and gives the saved keys path.</td></tr>
             <tr><th scope="row">Transfer failure or no reply</th><td>Report a transport error or timeout.</td></tr>
           </tbody>
@@ -541,7 +544,7 @@
         <table>
           <thead><tr><th scope="col">Check</th><th scope="col">Pass condition or dependency</th></tr></thead>
           <tbody>
-            <tr><th scope="row">Bluetooth S200 discovery</th><td>Prefer a connectable scale and then one with setup info. For equal ranks use the latest reported candidate. Stop early when it has both. If discovery fails, skip readiness and Standard Auth GATT.</td></tr>
+            <tr><th scope="row">Bluetooth S200 discovery</th><td>Stop early for a connectable scale that meets the registration predicate. Otherwise wait through the scan and prefer a connectable scale, then one with setup info. For equal fallback ranks use the latest reported candidate. If discovery fails, skip readiness and Standard Auth GATT.</td></tr>
             <tr><th scope="row">S200 registration readiness</th><td>Require the <a href="#registration-heading">unregistered ms113 setup profile</a> in the advertisement.</td></tr>
             <tr><th scope="row">Standard Auth over Bluetooth</th><td>Require a connectable advertisement and ask Windows to find the Xiaomi service (<code>FE95</code>) and its authentication characteristic (<code>0019</code>) on the scale. Run this even if readiness failed.</td></tr>
             <tr><th scope="row">Xiaomi browser sign-in</th><td>Get the smart-home session even if Bluetooth failed. If sign-in fails, skip the Europe API check.</td></tr>
@@ -557,8 +560,8 @@
       </div>
       <ol class="steps">
         <li>Find an eligible unregistered ms113 and read the local DER file. Use the same device-info check, ephemeral P-256 public keys, and HKDF as the cloud-backed flow.</li>
-        <li>Create the ASCII identity <code>test-</code> followed by the first seven bytes of the app public key as 14 lowercase hex digits. Prefix one zero byte and encrypt it using the same identity key, nonce, and additional data. Save candidate credentials under <code>target/s200-setup-test</code>.</li>
-        <li>Send the encrypted identity in authentication block <code>00</code> and the local certificate in block <code>07</code>. The scale’s control response determines registration. The test also exits successfully if the scale acknowledges delivery and gives no registration result.</li>
+        <li>Create the ASCII identity <code>test-</code> followed by the first seven bytes of the app public key as 14 lowercase hex digits. Prefix one zero byte and encrypt it using the same identity key, nonce, and additional data. Save address-matched pending credentials in the same per-user directory as cloud registrations.</li>
+        <li>Send the encrypted identity in authentication block <code>00</code> and the local certificate in block <code>07</code>. Mark the keys confirmed when the scale accepts registration so both readers can use them. If the scale only acknowledges delivery, keep the pending file and report the uncertain result.</li>
       </ol>
       <h3>Check the account separately</h3>
       <div class="quick-start">

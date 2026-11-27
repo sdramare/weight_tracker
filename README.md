@@ -36,7 +36,7 @@ cargo run -p blt_unlock_gui
 cargo run -- --weight
 ```
 
-Step on the scale and hold still. The desktop app shows live weight in kilograms as it arrives and keeps the last settled reading visible between weigh-ins. The terminal reader exits after one settled reading. Both use the Bluetooth login token saved in `target/s200-registration` during setup. [S200 Bluetooth protocol capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#data-channel)
+Step on the scale and hold still. The desktop app shows live weight in kilograms as it arrives and keeps the last settled reading visible between weigh-ins. The terminal reader exits after one settled reading and uses an authenticated broadcast if discovery already supplied one. Both readers load saved Bluetooth tokens from `%LOCALAPPDATA%\blt_unlock\s200-registration`. On startup they copy valid registrations still available in older `target/s200-registration` folders into the per-user store. [S200 Bluetooth protocol capture](https://github.com/Scuner/xiaomiS200_reversing_connection/blob/main/docs/PROTOCOL.md#data-channel)
 
 For a scale that broadcasts authenticated MiBeacon weight, you can use its 32-digit bind key instead. [Home Assistant’s Xiaomi BLE guide](https://www.home-assistant.io/integrations/xiaomi_ble/#encryption)
 
@@ -61,7 +61,7 @@ cargo run -- --register-scale
 
 Sign in once using the link from Xiaomi. When the Bluetooth scan starts, step on the unregistered S200 you want to register. The CLI reuses the Europe session to allocate a device ID and request Xiaomi's signed authorization during the Bluetooth handshake.
 
-Wait for `Scale setup complete`. That message means the scale itself confirmed setup. The CLI prints the path to the local keys in `target/s200-registration` before sending the authorization over Bluetooth so the keys are available if the response is interrupted.
+Wait for `Scale setup complete`. The CLI saves pending keys to the per-user store before sending authorization over Bluetooth. When the scale confirms setup, the CLI marks the keys confirmed and prints their final path.
 
 ## Inspect scale setup
 
@@ -87,7 +87,7 @@ To try local Standard Auth setup on an unregistered S200 `ms113`, place your tes
 cargo run -- --setup-test-cert --seconds 30
 ```
 
-The CLI requests setup information, exchanges P-256 public keys, and sends an encrypted local test device ID followed by the local test certificate. A transfer acknowledgment confirms delivery only. The scale reports registration on its control characteristic. Candidate credentials are saved under `target/s200-setup-test` before the registration request so they remain available if the scale completes setup and disconnects.
+The CLI requests setup information, exchanges P-256 public keys, and sends an encrypted local test device ID followed by the local test certificate. It saves pending keys with the scale’s address in the per-user store before sending the proof. A transfer acknowledgment confirms delivery only. When the scale’s control characteristic confirms registration, both readers can use the saved keys.
 
 ## Verify Xiaomi browser sign-in
 

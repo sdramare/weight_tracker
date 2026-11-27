@@ -3,7 +3,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::certificate_transfer::{RegistrationProof, SetupCertificateReply, register_with};
+use super::certificate_transfer::{
+    RegistrationProof, SetupCertificateReply, finish_credentials, register_with,
+};
 use super::find_registration_scale;
 use crate::cloud_sign_in::EuropeSession;
 use crate::{BluetoothAddress, XiaomiSignInLink};
@@ -90,14 +92,14 @@ pub fn register_scale_europe(
         let device_id = run_step(&mut report, AllocateDeviceId, || {
             session.allocate_device_id(address, &token)
         })?;
-        let credentials = registration
-            .save_cloud_credentials(credentials_directory, &device_id, address)
-            .map_err(|error| io::Error::new(error.kind(), format!("save S200 keys: {error}")))?;
-        report(CredentialsSaved(&credentials));
         let authorization = run_step(&mut report, RequestCertificate, || {
             session.authorize_standard_registration(&device_id, &token, &bind_key)
         })?;
         let encrypted_id = registration.encrypted_cloud_identity(&device_id, &authorization)?;
+        let credentials = registration
+            .save_cloud_credentials(credentials_directory, &device_id, address)
+            .map_err(|error| io::Error::new(error.kind(), format!("save S200 keys: {error}")))?;
+        report(CredentialsSaved(&credentials));
         let proof = RegistrationProof {
             encrypted_id,
             certificate: authorization.certificate,
@@ -106,6 +108,7 @@ pub fn register_scale_europe(
         Ok((proof, credentials))
     })?;
 
+    let credentials = finish_credentials(credentials, reply)?;
     if reply != SetupCertificateReply::RegistrationSucceeded {
         return Err(io::Error::other(format!(
             "{reply}. Candidate keys are saved in {}",

@@ -22,7 +22,7 @@ use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUnini
 
 pub use cloud_sign_in::{XiaomiSignInLink, verify_xiaomi_cloud_europe, verify_xiaomi_sign_in};
 pub use diagnostics::{SetupCheck, SetupCheckStatus, check_scale_setup};
-pub use login_keys::{SavedScaleLogins, ScaleLoginToken};
+pub use login_keys::{SavedScaleLogins, ScaleLoginToken, default_registration_directory};
 pub use setup::{
     ConnectedWeightEvent, RegisteredScale, RegistrationEvent, RegistrationStep, ScaleSetupInfo,
     SetupCertificateReply, find_registration_scale, listen_for_connected_weight,

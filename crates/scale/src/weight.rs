@@ -36,12 +36,15 @@ impl FromStr for ScaleBindKey {
     type Err = io::Error;
 
     fn from_str(value: &str) -> io::Result<Self> {
-        let hex = value.trim().as_bytes();
+        let (pairs, remainder) = value.trim().as_bytes().as_chunks::<2>();
         let mut key = [0; 16];
-        if hex.len() != key.len() * 2 || !hex.iter().all(u8::is_ascii_hexdigit) {
+        if pairs.len() != key.len() || !remainder.is_empty() {
             return Err(invalid_key());
         }
-        for (byte, pair) in key.iter_mut().zip(hex.chunks_exact(2)) {
+        for (byte, pair) in key.iter_mut().zip(pairs) {
+            if !pair.iter().all(u8::is_ascii_hexdigit) {
+                return Err(invalid_key());
+            }
             let pair = std::str::from_utf8(pair).map_err(|_| invalid_key())?;
             *byte = u8::from_str_radix(pair, 16).map_err(|_| invalid_key())?;
         }

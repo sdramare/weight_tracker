@@ -4,6 +4,7 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use super::cloud_sign_in::check_xiaomi_cloud_europe;
+use super::setup::registration_ready;
 use super::{Scale, XiaomiSignInLink, discover_scales, probe_setup_service};
 
 /// A read-only check of the prerequisites for S200 registration.
@@ -110,24 +111,27 @@ fn check_bluetooth(scan_time: Duration, report: &mut impl FnMut(SetupCheck, Setu
 
 fn scan_scale(scan_time: Duration) -> io::Result<Scale> {
     let mut candidate: Option<Scale> = None;
-    discover_scales(scan_time, |scale| {
-        if candidate
-            .as_ref()
-            .is_none_or(|previous| scale_rank(scale) >= scale_rank(previous))
-        {
-            candidate = Some(scale.clone());
-        }
-        if scale.is_connectable() && scale.setup_info().is_some() {
-            return ControlFlow::Break(());
-        }
-        ControlFlow::Continue(())
-    })?;
+    discover_scales(scan_time, |scale| consider_scale(&mut candidate, scale))?;
     candidate.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "no S200 broadcast was detected during the scan",
         )
     })
+}
+
+fn consider_scale(candidate: &mut Option<Scale>, scale: &Scale) -> ControlFlow<()> {
+    if registration_ready(scale) {
+        *candidate = Some(scale.clone());
+        return ControlFlow::Break(());
+    }
+    if candidate
+        .as_ref()
+        .is_none_or(|previous| scale_rank(scale) >= scale_rank(previous))
+    {
+        *candidate = Some(scale.clone());
+    }
+    ControlFlow::Continue(())
 }
 
 fn scale_rank(scale: &Scale) -> (bool, bool) {
@@ -138,5 +142,39 @@ fn result_status(result: &io::Result<()>) -> SetupCheckStatus<'_> {
     match result {
         Ok(()) => SetupCheckStatus::Passed,
         Err(error) => SetupCheckStatus::Failed(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::ControlFlow;
+
+    use super::consider_scale;
+    use crate::{BluetoothAddress, Scale, ScaleSetupInfo, SignalStrength};
+
+    #[test]
+    fn waits_for_a_scale_that_is_ready_to_register() {
+        let advertised = |address, control| Scale {
+            address: BluetoothAddress(address),
+            address_type: None,
+            name: None,
+            signal_strength: SignalStrength(-60),
+            connectable: true,
+            weight: None,
+            setup_info: ScaleSetupInfo::from_mibeacon(&[0x95, 0xfe, 0x10, control, 0xcb, 0x4d]),
+        };
+        let registered = advertised(1, 0x5b);
+        let ready = advertised(2, 0x5a);
+        let mut candidate = None;
+        assert_eq!(
+            consider_scale(&mut candidate, &registered),
+            ControlFlow::Continue(())
+        );
+        assert_eq!(candidate.as_ref(), Some(&registered));
+        assert_eq!(
+            consider_scale(&mut candidate, &ready),
+            ControlFlow::Break(())
+        );
+        assert_eq!(candidate, Some(ready));
     }
 }

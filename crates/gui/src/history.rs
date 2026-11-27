@@ -14,14 +14,51 @@ pub(super) struct WeightEntry {
     pub(super) weight: Weight,
 }
 
-pub(super) struct History(Connection);
+struct History(Connection);
 
-impl History {
-    pub(super) fn open() -> io::Result<Self> {
-        let path = default_path()?;
-        Self::open_at(&path)
+#[derive(Default)]
+pub(super) struct HistoryMonitor {
+    path: Option<PathBuf>,
+    connection: Option<History>,
+    data_version: Option<i64>,
+}
+
+impl HistoryMonitor {
+    pub(super) fn refresh(&mut self) -> io::Result<Option<Vec<WeightEntry>>> {
+        let previous = self.data_version;
+        let connection = self.connection()?;
+        let current = connection.data_version().map_err(io::Error::other)?;
+        if previous == Some(current) {
+            return Ok(None);
+        }
+        let entries = connection.entries().map_err(io::Error::other)?;
+        self.data_version = Some(current);
+        Ok(Some(entries))
     }
 
+    pub(super) fn record(&mut self, weight: Weight) -> io::Result<Option<Vec<WeightEntry>>> {
+        if self.connection()?.record(weight)?.is_some() {
+            // SQLite data_version changes only for commits made by other connections.
+            self.data_version = None;
+        }
+        self.refresh()
+    }
+
+    fn connection(&mut self) -> io::Result<&History> {
+        match self.connection {
+            Some(ref connection) => Ok(connection),
+            None => {
+                let path = match &self.path {
+                    Some(path) => path,
+                    None => self.path.insert(default_path()?),
+                };
+                Ok(self.connection.insert(History::open_at(path)?))
+            }
+        }
+    }
+}
+
+impl History {
     fn open_at(path: &Path) -> io::Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -41,7 +78,12 @@ impl History {
         Ok(Self(connection))
     }
 
-    pub(super) fn entries(&self) -> rusqlite::Result<Vec<WeightEntry>> {
+    fn data_version(&self) -> rusqlite::Result<i64> {
+        self.0
+            .pragma_query_value(None, "data_version", |row| row.get(0))
+    }
+
+    fn entries(&self) -> rusqlite::Result<Vec<WeightEntry>> {
         let mut statement = self.0.prepare(
             "SELECT measured_at_ms, weight_hundredths_kg
              FROM weigh_ins
@@ -57,7 +99,7 @@ impl History {
             .collect()
     }
 
-    pub(super) fn record(&self, weight: Weight) -> io::Result<Option<WeightEntry>> {
+    fn record(&self, weight: Weight) -> io::Result<Option<WeightEntry>> {
         let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?;
@@ -104,7 +146,10 @@ fn default_path() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Connection, History, MIN_INTERVAL_MS, Weight, WeightEntry};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{Connection, History, HistoryMonitor, MIN_INTERVAL_MS, Weight, WeightEntry};
 
     #[test]
     fn only_records_more_than_24_hours_after_the_last_entry() {
@@ -130,5 +175,38 @@ mod tests {
         );
         assert_eq!(history.record_at(next).unwrap(), Some(next));
         assert_eq!(history.entries().unwrap(), [first, next]);
+    }
+
+    #[test]
+    fn recovers_after_a_startup_lock_and_reloads_another_connection() {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("s200-history-{}-{id}.sqlite3", std::process::id()));
+        let writer = History::open_at(&path).unwrap();
+        writer.0.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let mut monitor = HistoryMonitor {
+            path: Some(path.clone()),
+            ..Default::default()
+        };
+        assert!(monitor.refresh().is_err());
+        writer.0.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(monitor.refresh().unwrap(), Some(Vec::new()));
+
+        let weight = Weight::from_hundredths_of_kg(7250);
+        let first = writer.record(weight).unwrap().unwrap();
+        assert_eq!(monitor.record(weight).unwrap(), Some(vec![first]));
+        assert!(monitor.refresh().unwrap().is_none());
+        let next = WeightEntry {
+            measured_at_ms: first.measured_at_ms + MIN_INTERVAL_MS + 1,
+            weight,
+        };
+        assert_eq!(writer.record_at(next).unwrap(), Some(next));
+        assert_eq!(monitor.refresh().unwrap(), Some(vec![first, next]));
+        drop(monitor);
+        drop(writer);
+        fs::remove_file(path).unwrap();
     }
 }

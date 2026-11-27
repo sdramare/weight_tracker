@@ -1,5 +1,4 @@
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use aes::Aes128;
@@ -15,6 +14,7 @@ use sha2::Sha256;
 
 use crate::BluetoothAddress;
 use crate::cloud_sign_in::{CloudAuthorization, CloudDeviceId};
+use crate::login_keys::{PENDING_SUFFIX, write_new_credentials};
 
 type DeviceIdCipher = Ccm<Aes128, U4, U12>;
 const DEVICE_ID_NONCE: [u8; 12] = [
@@ -97,8 +97,13 @@ impl Registration {
         Ok(plain)
     }
 
-    pub(super) fn save_trial_credentials(&self, directory: &Path) -> io::Result<()> {
-        self.save_credentials(&directory.join(format!("{}.keys", self.device_id)), None)
+    pub(super) fn save_trial_credentials(
+        &self,
+        directory: &Path,
+        address: BluetoothAddress,
+    ) -> io::Result<PathBuf> {
+        let path = directory.join(format!("s200-{}{PENDING_SUFFIX}", self.device_id));
+        self.save_credentials(path, address)
     }
 
     pub(super) fn save_cloud_credentials(
@@ -107,9 +112,12 @@ impl Registration {
         id: &CloudDeviceId,
         address: BluetoothAddress,
     ) -> io::Result<PathBuf> {
-        let path = directory.join(format!("s200-{}-{}.keys", id.as_str(), self.device_id));
-        self.save_credentials(&path, Some(address))?;
-        Ok(path)
+        let path = directory.join(format!(
+            "s200-{}-{}{PENDING_SUFFIX}",
+            id.as_str(),
+            self.device_id
+        ));
+        self.save_credentials(path, address)
     }
 
     pub(super) fn login_token_hex(&self) -> String {
@@ -126,29 +134,14 @@ impl Registration {
             .collect()
     }
 
-    fn save_credentials(&self, path: &Path, address: Option<BluetoothAddress>) -> io::Result<()> {
-        let directory = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "missing credentials directory")
-        })?;
-        fs::create_dir_all(directory)?;
-        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-        // Retain the keys if the scale enrolls and disconnects before reporting its result.
-        let mut contents = format!(
-            "login_token={}\nbind_key={}\n",
+    fn save_credentials(&self, path: PathBuf, address: BluetoothAddress) -> io::Result<PathBuf> {
+        let contents = format!(
+            "login_token={}\nbind_key={}\nbluetooth_address={address}\n",
             self.login_token_hex(),
             self.bind_key_hex()
         );
-        if let Some(address) = address {
-            contents.push_str(&format!("bluetooth_address={address}\n"));
-        }
-        let written = file
-            .write_all(contents.as_bytes())
-            .and_then(|()| file.sync_all());
-        if written.is_err() {
-            drop(file);
-            let _ = fs::remove_file(path);
-        }
-        written
+        write_new_credentials(&path, &contents, None)?;
+        Ok(path)
     }
 }
 
@@ -173,7 +166,12 @@ fn derive_keys(shared: &[u8]) -> io::Result<[u8; 64]> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::{RegistrationKeys, cloud_identity_payload};
+    use crate::BluetoothAddress;
+    use crate::setup::certificate_transfer::{SetupCertificateReply, finish_credentials};
 
     #[test]
     fn derives_the_same_keys_on_both_ends() {
@@ -194,5 +192,41 @@ mod tests {
         assert_eq!(&payload[..20], b"\0\0\0\0\0\0blt.3.test-dev");
         assert_eq!(&payload[20..84], &[0xe1; 64]);
         assert_eq!(&payload[84..], &[0x78, 0x56, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn retains_local_trial_keys_until_the_scale_confirms_its_addressed_registration() {
+        let app = RegistrationKeys::generate();
+        let scale = RegistrationKeys::generate();
+        let registration = app.finish(scale.public_key()).unwrap();
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("s200-trial-{}-{id}", std::process::id()));
+        let pending = registration
+            .save_trial_credentials(&directory, BluetoothAddress(1))
+            .unwrap();
+        assert!(pending.to_string_lossy().ends_with(".pending.keys"));
+        assert_eq!(
+            finish_credentials(
+                pending.clone(),
+                SetupCertificateReply::ReceivedWithoutRegistrationResult
+            )
+            .unwrap(),
+            pending,
+        );
+        let saved = fs::read_to_string(&pending).unwrap();
+        assert!(saved.contains("bluetooth_address=00:00:00:00:00:01"));
+        let confirmed = finish_credentials(
+            pending.clone(),
+            SetupCertificateReply::RegistrationSucceeded,
+        )
+        .unwrap();
+        assert!(confirmed.to_string_lossy().ends_with(".confirmed.keys"));
+        assert_eq!(fs::read_to_string(confirmed).unwrap(), saved);
+        assert!(!pending.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -88,20 +88,20 @@ pub(super) fn show(ui: &mut egui::Ui, entries: &[WeightEntry], grouping: &mut Gr
             plot.points(
                 Points::new(name, PlotPoints::from(points.clone()))
                     .color(MEASURED)
-                    .radius(3.5),
+                    .radius(3.5_f32),
             );
             if points.len() > 1 {
                 plot.line(
                     Line::new(name, PlotPoints::from(points))
                         .color(MEASURED)
-                        .width(2.2),
+                        .width(2.2_f32),
                 );
             }
             if let Some(forecast) = forecast {
                 plot.line(
                     Line::new("30-day forecast", PlotPoints::from(forecast.to_vec()))
                         .color(FORECAST)
-                        .width(2.0)
+                        .width(2.0_f32)
                         .style(LineStyle::Dashed { length: 7.0 }),
                 );
             }

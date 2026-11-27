@@ -24,11 +24,7 @@ pub use registration::{
 pub fn find_registration_scale(duration: Duration) -> io::Result<Scale> {
     let mut candidate = None;
     discover_scales(duration, |scale| {
-        if scale.is_connectable()
-            && scale
-                .setup_info()
-                .is_some_and(|info| info.requests_certificate_test())
-        {
+        if registration_ready(scale) {
             candidate = Some(scale.clone());
             return ControlFlow::Break(());
         }
@@ -40,6 +36,13 @@ pub fn find_registration_scale(duration: Duration) -> io::Result<Scale> {
             "no connectable, unregistered S200 ms113 requested setup",
         )
     })
+}
+
+pub(super) fn registration_ready(scale: &Scale) -> bool {
+    scale.is_connectable()
+        && scale
+            .setup_info()
+            .is_some_and(|info| info.requests_certificate_test())
 }
 
 /// Connects to the scale and checks for the Xiaomi Standard Auth characteristic.
@@ -112,6 +115,10 @@ enum Authentication {
 impl ScaleSetupInfo {
     pub(crate) fn is_ms113(&self) -> bool {
         self.product_id == 0x4dcb
+    }
+
+    pub(crate) fn registered(&self) -> Option<bool> {
+        self.flags.map(|flags| flags.registered)
     }
 
     /// The supported variant is unregistered and currently requesting Standard Auth setup.

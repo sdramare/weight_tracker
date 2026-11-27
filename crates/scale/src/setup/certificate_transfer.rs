@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
@@ -16,6 +16,7 @@ use super::registration_crypto::{Registration, RegistrationKeys};
 use super::{
     Apartment, Scale, check_service_status, open_scale_device, setup_characteristic, setup_service,
 };
+use crate::login_keys::{CONFIRMED_SUFFIX, PENDING_SUFFIX, REJECTED_SUFFIX};
 
 const TEST_CERTIFICATE_PATH: &str = "crates/scale/src/setup/s200-local-test.der";
 const CERTIFICATE_BLOCK: u8 = 0x07;
@@ -66,18 +67,49 @@ pub fn send_setup_test_certificate(
             format!("could not read local test certificate at {TEST_CERTIFICATE_PATH}: {error}"),
         )
     })?;
-    register_with(scale, |registration| {
+    let (reply, credentials) = register_with(scale, |registration| {
         let encrypted_id = registration.encrypted_device_id()?;
-        registration.save_trial_credentials(credentials_directory)?;
+        let credentials =
+            registration.save_trial_credentials(credentials_directory, scale.address())?;
         Ok((
             RegistrationProof {
                 encrypted_id,
                 certificate,
             },
-            (),
+            credentials,
         ))
-    })
-    .map(|(reply, ())| reply)
+    })?;
+    finish_credentials(credentials, reply)?;
+    Ok(reply)
+}
+
+pub(super) fn finish_credentials(
+    path: PathBuf,
+    reply: SetupCertificateReply,
+) -> io::Result<PathBuf> {
+    let suffix = match reply {
+        SetupCertificateReply::RegistrationSucceeded => CONFIRMED_SUFFIX,
+        SetupCertificateReply::RegistrationFailed | SetupCertificateReply::AlreadyRegistered => {
+            REJECTED_SUFFIX
+        }
+        SetupCertificateReply::ReceivedWithoutRegistrationResult => return Ok(path),
+    };
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(PENDING_SUFFIX))
+        .ok_or_else(|| io::Error::other("invalid S200 candidate key filename"))?;
+    let destination = path.with_file_name(format!("{stem}{suffix}"));
+    fs::rename(&path, &destination).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{reply}. Could not update the keys at {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    Ok(destination)
 }
 
 pub(super) struct RegistrationProof {
