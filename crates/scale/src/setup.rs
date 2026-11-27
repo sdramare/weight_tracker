@@ -12,51 +12,45 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::{GattCharacteristic, G
 use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice, BluetoothUuidHelper};
 
 use super::{
-    Apartment, Scale, check_cancellation, check_service_status, discovery, open_scale_device,
+    Apartment, Scale, ScaleScanObserver, ScaleSetupInteraction, Weight, check_service_status,
+    discover_scales, open_scale_device,
 };
 
 pub use certificate_transfer::{
     SetupCertificateReply, SetupProfile, probe_setup_profile, send_setup_test_certificate,
 };
 pub use connected_weight::{
-    ConnectedWeightEvent, listen_for_connected_weight, watch_connected_weights,
+    ConnectedWeightEvent, WeightSessionObserver, listen_for_connected_weight,
+    watch_connected_weights,
 };
 pub use registration::{
-    RegisteredScale, RegistrationEvent, RegistrationStep, register_scale_europe,
-    register_scale_europe_while,
+    RegisteredScale, RegistrationEvent, RegistrationObserver, RegistrationStep,
+    register_scale_europe,
 };
 
 /// Finds the first connectable S200 ms113 that advertises unregistered Standard Auth.
 pub fn find_registration_scale(duration: Duration) -> io::Result<Scale> {
-    find_registration_scale_while(duration, &|| true)
+    find_registration_scale_with(duration, None)
 }
 
-fn find_registration_scale_while(
+fn find_registration_scale_with(
     duration: Duration,
-    keep_going: &impl Fn() -> bool,
+    interaction: Option<&mut dyn ScaleSetupInteraction>,
 ) -> io::Result<Scale> {
-    check_cancellation(keep_going)?;
-    let _apartment = Apartment::initialize()?;
-    let mut candidate = None;
-    let mut blockers = HashMap::new();
-    discovery::discover(
-        duration,
-        None,
-        keep_going,
-        |scale| match registration_status(scale) {
-            Ok(()) => {
-                candidate = Some(scale.clone());
-                ControlFlow::Break(())
-            }
-            Err(blocker) => {
-                blockers.insert(scale.address(), blocker);
-                ControlFlow::Continue(())
-            }
-        },
-    )?;
-    check_cancellation(keep_going)?;
-    candidate.ok_or_else(|| {
-        blockers.into_values().max().map_or_else(
+    let mut scan = RegistrationScaleSearch {
+        interaction,
+        candidate: None,
+        blockers: HashMap::new(),
+    };
+    if !scan.should_scan() {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    discover_scales(duration, &mut scan)?;
+    if !scan.should_scan() {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    scan.candidate.ok_or_else(|| {
+        scan.blockers.into_values().max().map_or_else(
             || io::Error::new(
                 io::ErrorKind::NotFound,
                 "Windows did not see an S200 during this scan. Keep the scale near this PC and step on it when setup starts scanning.",
@@ -64,6 +58,33 @@ fn find_registration_scale_while(
             |blocker| io::Error::new(io::ErrorKind::NotFound, blocker.message()),
         )
     })
+}
+
+struct RegistrationScaleSearch<'a> {
+    interaction: Option<&'a mut dyn ScaleSetupInteraction>,
+    candidate: Option<Scale>,
+    blockers: HashMap<super::BluetoothAddress, SetupBlocker>,
+}
+
+impl ScaleScanObserver for RegistrationScaleSearch<'_> {
+    fn should_scan(&mut self) -> bool {
+        self.interaction
+            .as_mut()
+            .is_none_or(|interaction| !interaction.setup_cancelled())
+    }
+
+    fn scale_discovered(&mut self, scale: &Scale, _: Option<Weight>) -> ControlFlow<()> {
+        match registration_status(scale) {
+            Ok(()) => {
+                self.candidate = Some(scale.clone());
+                ControlFlow::Break(())
+            }
+            Err(blocker) => {
+                self.blockers.insert(scale.address(), blocker);
+                ControlFlow::Continue(())
+            }
+        }
+    }
 }
 
 pub(super) fn registration_ready(scale: &Scale) -> bool {

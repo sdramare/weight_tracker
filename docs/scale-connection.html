@@ -65,6 +65,8 @@
     .steps li::marker { color: var(--accent); font-weight: 650; }
     .fields { margin-block: .75rem; overflow-x: auto; }
     .fields:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .rust-interfaces table { min-width: 46rem; }
+    .rust-interfaces th code { white-space: nowrap; }
     table { width: 100%; border-collapse: collapse; text-align: left; font-size: .92rem; }
     caption { padding-bottom: .35rem; text-align: left; font-weight: 650; }
     th, td { padding: .52rem .65rem; vertical-align: top; border-bottom: 1px solid var(--line); }
@@ -119,6 +121,7 @@
           <li><a href="#transport-heading">Packet framing</a></li>
           <li><a href="#cloud-heading">Xiaomi cloud session</a></li>
           <li><a href="#setup-heading">Diagnostics</a></li>
+          <li><a href="#rust-heading">Rust interfaces</a></li>
           <li><a href="#help-heading">Troubleshooting</a></li>
         </ul>
       </nav>
@@ -585,6 +588,24 @@
         <p>Sign in and check whether Xiaomi’s Europe API accepts a signed, read-only account request.</p>
       </div>
       <p class="source"><a href="../crates/scale/src/diagnostics.rs">Check dependencies</a> · <a href="../crates/cli/src/main.rs">CLI results and exit codes</a></p>
+    </section>
+
+    <section class="panel" aria-labelledby="rust-heading">
+      <h2 id="rust-heading">Trace a flow in Rust</h2>
+      <div class="fields rust-interfaces" role="region" aria-label="Rust traits and implementations" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">Trait</th><th scope="col">Methods to follow</th><th scope="col">Implementations</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><a href="../crates/scale/src/discovery.rs"><code>ScaleScanObserver</code></a></th><td><code>should_scan</code> controls the scan loop. <code>scale_discovered</code> receives the merged device state and any weight from the current advertisement.</td><td><code>DesktopScaleScan</code>, <code>TerminalWeightScan</code>, <code>TerminalSetupInfo</code></td></tr>
+            <tr><th scope="row"><a href="../crates/scale/src/setup/connected_weight.rs"><code>WeightSessionObserver</code></a></th><td><code>should_read_weight</code> controls the continuous wait. <code>on_weight_event</code> receives the login and reading events.</td><td><code>DesktopWeightSession</code>, <code>TerminalWeightDisplay</code></td></tr>
+            <tr><th scope="row"><a href="../crates/scale/src/cloud_sign_in.rs"><code>ScaleSetupInteraction</code></a></th><td><code>present_xiaomi_sign_in</code> shows the browser link. <code>setup_cancelled</code> lets the desktop stop sign-in or setup discovery.</td><td><code>DesktopRegistration</code> and the terminal sign-in and setup types</td></tr>
+            <tr><th scope="row"><a href="../crates/scale/src/setup/registration.rs"><code>RegistrationObserver</code></a></th><td><code>report_registration</code> receives progress through Bluetooth, Xiaomi authorization, and the scale’s confirmation.</td><td><code>DesktopRegistration</code>, <code>TerminalRegistration</code></td></tr>
+            <tr><th scope="row"><a href="../crates/scale/src/diagnostics.rs"><code>SetupCheckObserver</code></a></th><td><code>report_setup_check</code> receives each diagnostic result.</td><td><code>TerminalSetupChecks</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The desktop implementations share one <code>ScaleMonitor</code>. Its scan and weight observers yield to a queued registration request. Inside the library, <code>RegistrationAuthorizer</code> prepares the cloud or test proof. <code>BlockPacketSource</code> supplies notifications to the shared packet reader.</p>
+      <p class="source"><a href="../crates/gui/src/desktop.rs">Desktop implementations</a> · <a href="../crates/cli/src/main.rs">Terminal implementations</a> · <a href="../crates/scale/src/setup/certificate_transfer.rs">Registration and packet reader traits</a></p>
     </section>
 
     <section class="panel" aria-labelledby="help-heading">

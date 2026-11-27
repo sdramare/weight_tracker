@@ -1,4 +1,14 @@
 use std::process::ExitCode;
+#[cfg(windows)]
+use std::{collections::BTreeMap, ops::ControlFlow};
+
+#[cfg(windows)]
+use xiaomi_s200::{
+    BluetoothAddress, ConnectedWeightEvent, RegistrationEvent, RegistrationObserver,
+    RegistrationStep, SavedScaleLogins, Scale, ScaleScanObserver, ScaleSetupInfo,
+    ScaleSetupInteraction, SetupCheck, SetupCheckObserver, SetupCheckStatus, Weight, WeightReading,
+    WeightSessionObserver, XiaomiSignInLink,
+};
 
 const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --setup-profile | --setup-test-cert | --check-setup] [--seconds <1-60>]\n\
     blt_unlock --register-scale [--seconds <1-60>]\n\
@@ -128,34 +138,17 @@ fn run(seconds: u64, command: Command) -> ExitCode {
 
 #[cfg(windows)]
 fn check_setup(duration: std::time::Duration) -> ExitCode {
-    use xiaomi_s200::SetupCheckStatus;
-
     println!(
         "Step on the S200 to wake it. The Bluetooth scan lasts up to {} seconds.",
         duration.as_secs()
     );
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut skipped = 0;
-    xiaomi_s200::check_scale_setup(
-        duration,
-        present_xiaomi_link,
-        |check, status| match status {
-            SetupCheckStatus::Started => println!("[RUN]  {check}"),
-            SetupCheckStatus::Passed => {
-                passed += 1;
-                println!("[PASS] {check}");
-            }
-            SetupCheckStatus::Failed(error) => {
-                failed += 1;
-                println!("[FAIL] {check} — {error}");
-            }
-            SetupCheckStatus::Skipped(prerequisite) => {
-                skipped += 1;
-                println!("[SKIP] {check} — requires {prerequisite}");
-            }
-        },
-    );
+    let mut checks = TerminalSetupChecks::default();
+    xiaomi_s200::check_scale_setup(duration, &mut checks);
+    let TerminalSetupChecks {
+        passed,
+        failed,
+        skipped,
+    } = checks;
     println!("Setup checks: {passed} passed, {failed} failed, {skipped} skipped.");
     if failed == 0 && skipped == 0 {
         ExitCode::SUCCESS
@@ -165,9 +158,45 @@ fn check_setup(duration: std::time::Duration) -> ExitCode {
 }
 
 #[cfg(windows)]
+#[derive(Default)]
+struct TerminalSetupChecks {
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+#[cfg(windows)]
+impl ScaleSetupInteraction for TerminalSetupChecks {
+    fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink) {
+        present_xiaomi_link(link);
+    }
+}
+
+#[cfg(windows)]
+impl SetupCheckObserver for TerminalSetupChecks {
+    fn report_setup_check(&mut self, check: SetupCheck, status: SetupCheckStatus<'_>) {
+        match status {
+            SetupCheckStatus::Started => println!("[RUN]  {check}"),
+            SetupCheckStatus::Passed => {
+                self.passed += 1;
+                println!("[PASS] {check}");
+            }
+            SetupCheckStatus::Failed(error) => {
+                self.failed += 1;
+                println!("[FAIL] {check} — {error}");
+            }
+            SetupCheckStatus::Skipped(prerequisite) => {
+                self.skipped += 1;
+                println!("[SKIP] {check} — requires {prerequisite}");
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 fn show_xiaomi_sign_in() -> std::io::Result<()> {
     println!("Requesting a browser sign-in link from Xiaomi...");
-    xiaomi_s200::verify_xiaomi_sign_in(present_xiaomi_link)?;
+    xiaomi_s200::verify_xiaomi_sign_in(&mut TerminalSignIn)?;
     println!("Xiaomi issued a smart-home account session. Sign-in confirmed.");
     Ok(())
 }
@@ -175,13 +204,23 @@ fn show_xiaomi_sign_in() -> std::io::Result<()> {
 #[cfg(windows)]
 fn check_xiaomi_cloud() -> std::io::Result<()> {
     println!("Requesting a browser sign-in link to check Xiaomi's Europe API...");
-    xiaomi_s200::verify_xiaomi_cloud_europe(present_xiaomi_link)?;
+    xiaomi_s200::verify_xiaomi_cloud_europe(&mut TerminalSignIn)?;
     println!("Xiaomi's Europe API accepted the signed request.");
     Ok(())
 }
 
 #[cfg(windows)]
-fn present_xiaomi_link(link: &xiaomi_s200::XiaomiSignInLink) {
+struct TerminalSignIn;
+
+#[cfg(windows)]
+impl ScaleSetupInteraction for TerminalSignIn {
+    fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink) {
+        present_xiaomi_link(link);
+    }
+}
+
+#[cfg(windows)]
+fn present_xiaomi_link(link: &XiaomiSignInLink) {
     println!("Open this one-time link in your browser and sign in on Xiaomi’s page.");
     println!("{link}");
     println!("Keep this terminal open while Xiaomi confirms sign-in.");
@@ -208,8 +247,6 @@ fn show_connection(duration: std::time::Duration) -> std::io::Result<()> {
 #[cfg(windows)]
 fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
     use std::io;
-    use std::ops::ControlFlow;
-    use xiaomi_s200::{ConnectedWeightEvent, SavedScaleLogins, WeightReading};
 
     let logins = match SavedScaleLogins::load_default() {
         Ok(logins) => logins,
@@ -238,45 +275,29 @@ fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
         "Looking for the S200 for up to {} seconds. Tap it to wake it.",
         duration.as_secs()
     );
-    let mut target = None;
-    let mut reading = None;
-    let on_scale = |scale: &xiaomi_s200::Scale| {
-        if let Some(weight) = scale.weight() {
-            reading = Some((scale.address(), weight));
-            return ControlFlow::Break(());
-        }
-        if scale.is_connectable() && logins.token_for(scale).is_some() {
-            target = Some(scale.clone());
-            return ControlFlow::Break(());
-        }
-        ControlFlow::Continue(())
+    let mut scan = TerminalWeightScan {
+        logins: &logins,
+        target: None,
+        reading: None,
     };
     if let Some(key) = bind_key {
-        xiaomi_s200::discover_scales_with_weight(duration, &key, on_scale)?;
+        xiaomi_s200::discover_scales_with_weight(duration, &key, &mut scan)?;
     } else {
-        xiaomi_s200::discover_scales(duration, on_scale)?;
+        xiaomi_s200::discover_scales(duration, &mut scan)?;
     }
-    if let Some(scale) = target
+    if let Some(scale) = scan.target
         && let Some(token) = logins.token_for(&scale)
     {
         let address = scale.address();
         println!("Connecting to {address} with its saved login token...");
-        return xiaomi_s200::listen_for_connected_weight(&scale, token, duration, |event| {
-            match event {
-                ConnectedWeightEvent::Ready => {
-                    println!("Connected. Step on the scale and hold still.")
-                }
-                ConnectedWeightEvent::Reading(WeightReading::Live(weight)) => {
-                    println!("{address}  {weight} (live)");
-                }
-                ConnectedWeightEvent::Reading(WeightReading::Settled(weight)) => {
-                    println!("{address}  {weight} (settled)");
-                }
-            }
-            ControlFlow::Continue(())
-        });
+        return xiaomi_s200::listen_for_connected_weight(
+            &scale,
+            token,
+            duration,
+            &mut TerminalWeightDisplay { address },
+        );
     }
-    let (address, weight) = reading.ok_or_else(|| {
+    let (address, weight) = scan.reading.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::TimedOut,
             "No S200 with matching saved keys or authenticated weight was found during the scan.",
@@ -287,33 +308,86 @@ fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
+struct TerminalWeightScan<'a> {
+    logins: &'a SavedScaleLogins,
+    target: Option<Scale>,
+    reading: Option<(BluetoothAddress, Weight)>,
+}
+
+#[cfg(windows)]
+impl ScaleScanObserver for TerminalWeightScan<'_> {
+    fn scale_discovered(&mut self, scale: &Scale, _: Option<Weight>) -> ControlFlow<()> {
+        if let Some(weight) = scale.weight() {
+            self.reading = Some((scale.address(), weight));
+            return ControlFlow::Break(());
+        }
+        if scale.is_connectable() && self.logins.token_for(scale).is_some() {
+            self.target = Some(scale.clone());
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+#[cfg(windows)]
+struct TerminalWeightDisplay {
+    address: BluetoothAddress,
+}
+
+#[cfg(windows)]
+impl WeightSessionObserver for TerminalWeightDisplay {
+    fn on_weight_event(&mut self, event: ConnectedWeightEvent) -> ControlFlow<()> {
+        let address = self.address;
+        match event {
+            ConnectedWeightEvent::Ready => println!("Connected. Step on the scale and hold still."),
+            ConnectedWeightEvent::Reading(WeightReading::Live(weight)) => {
+                println!("{address}  {weight} (live)")
+            }
+            ConnectedWeightEvent::Reading(WeightReading::Settled(weight)) => {
+                println!("{address}  {weight} (settled)")
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+#[cfg(windows)]
 fn show_setup_info(duration: std::time::Duration) -> std::io::Result<()> {
-    use std::collections::BTreeMap;
     use std::io;
-    use std::ops::ControlFlow;
 
     println!(
         "Listening for S200 setup information for up to {} seconds. Step on the scale to wake it.",
         duration.as_secs()
     );
-    let mut reports = BTreeMap::new();
-    xiaomi_s200::discover_scales(duration, |scale| {
-        let Some(info) = scale.setup_info() else {
-            return ControlFlow::Continue(());
-        };
-        let address = scale.address();
-        if reports.insert(address, info) != Some(info) {
-            println!("{address}  {info}");
-        }
-        ControlFlow::Continue(())
-    })?;
-    if reports.is_empty() {
+    let mut scan = TerminalSetupInfo::default();
+    xiaomi_s200::discover_scales(duration, &mut scan)?;
+    if scan.reports.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "No S200 MiBeacon setup information arrived.",
         ));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct TerminalSetupInfo {
+    reports: BTreeMap<BluetoothAddress, ScaleSetupInfo>,
+}
+
+#[cfg(windows)]
+impl ScaleScanObserver for TerminalSetupInfo {
+    fn scale_discovered(&mut self, scale: &Scale, _: Option<Weight>) -> ControlFlow<()> {
+        let Some(info) = scale.setup_info() else {
+            return ControlFlow::Continue(());
+        };
+        let address = scale.address();
+        if self.reports.insert(address, info) != Some(info) {
+            println!("{address}  {info}");
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 #[cfg(windows)]
@@ -346,27 +420,12 @@ fn run(_seconds: u64, _command: Command) -> ExitCode {
 
 #[cfg(windows)]
 fn register_scale(duration: std::time::Duration) -> std::io::Result<()> {
-    use xiaomi_s200::{RegistrationEvent, RegistrationStep};
-
     let credentials = xiaomi_s200::default_registration_directory()?;
     let scale = xiaomi_s200::register_scale_europe(
         duration,
         &credentials,
-        present_xiaomi_link,
-        |event| match event {
-            RegistrationEvent::Started(step) => {
-                println!("[RUN]  {step}");
-                if step == RegistrationStep::ScaleDiscovery {
-                    println!(
-                        "Step on the S200 you want to register. The Bluetooth scan lasts up to {} seconds.",
-                        duration.as_secs()
-                    );
-                }
-            }
-            RegistrationEvent::Passed(step) => println!("[PASS] {step}"),
-            RegistrationEvent::CredentialsSaved(path) => {
-                println!("Pending S200 keys saved locally in {}.", path.display());
-            }
+        &mut TerminalRegistration {
+            scan_time: duration,
         },
     )?;
     println!("Scale setup complete for {}.", scale.address());
@@ -375,6 +434,39 @@ fn register_scale(duration: std::time::Duration) -> std::io::Result<()> {
         scale.credentials_file().display()
     );
     Ok(())
+}
+
+#[cfg(windows)]
+struct TerminalRegistration {
+    scan_time: std::time::Duration,
+}
+
+#[cfg(windows)]
+impl ScaleSetupInteraction for TerminalRegistration {
+    fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink) {
+        present_xiaomi_link(link);
+    }
+}
+
+#[cfg(windows)]
+impl RegistrationObserver for TerminalRegistration {
+    fn report_registration(&mut self, event: RegistrationEvent<'_>) {
+        match event {
+            RegistrationEvent::Started(step) => {
+                println!("[RUN]  {step}");
+                if step == RegistrationStep::ScaleDiscovery {
+                    println!(
+                        "Step on the S200 you want to register. The Bluetooth scan lasts up to {} seconds.",
+                        self.scan_time.as_secs()
+                    );
+                }
+            }
+            RegistrationEvent::Passed(step) => println!("[PASS] {step}"),
+            RegistrationEvent::CredentialsSaved(path) => {
+                println!("Pending S200 keys saved locally in {}.", path.display());
+            }
+        }
+    }
 }
 
 #[cfg(windows)]

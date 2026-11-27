@@ -2,17 +2,17 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use eframe::egui;
-use xiaomi_s200::{
-    RegisteredScale, RegistrationEvent, RegistrationStep, default_registration_directory,
-    register_scale_europe_while,
-};
-
-const SCAN_TIME: Duration = Duration::from_secs(30);
+use xiaomi_s200::{RegisteredScale, RegistrationStep};
 
 pub(super) struct SetupRequest(Arc<AtomicBool>);
+
+impl SetupRequest {
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 pub(super) enum SetupUpdate {
     Step(RegistrationStep),
@@ -156,25 +156,6 @@ impl SetupAttempt {
             }
         }
     }
-}
-
-pub(super) fn run(
-    request: SetupRequest,
-    keep_running: impl Fn() -> bool,
-    post: impl Fn(SetupUpdate),
-) -> io::Result<RegisteredScale> {
-    let directory = default_registration_directory()?;
-    register_scale_europe_while(
-        SCAN_TIME,
-        &directory,
-        || !request.0.load(Ordering::Relaxed) && keep_running(),
-        |link| post(SetupUpdate::SignInLink(link.to_string())),
-        |event| {
-            if let RegistrationEvent::Started(step) = event {
-                post(SetupUpdate::Step(step));
-            }
-        },
-    )
 }
 
 #[cfg(test)]

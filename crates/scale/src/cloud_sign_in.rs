@@ -24,6 +24,15 @@ const MAX_SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
 /// A short-lived sign-in link on Xiaomi's account service.
 pub struct XiaomiSignInLink(Url);
 
+/// Presents Xiaomi's browser link and tracks cancellation during scale setup.
+pub trait ScaleSetupInteraction {
+    fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink);
+
+    fn setup_cancelled(&mut self) -> bool {
+        false
+    }
+}
+
 impl fmt::Display for XiaomiSignInLink {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
@@ -34,23 +43,14 @@ impl fmt::Display for XiaomiSignInLink {
 ///
 /// The caller presents the login link. The function waits for Xiaomi to finish
 /// authorization, then verifies that its callback issued a service session.
-pub fn verify_xiaomi_sign_in(present: impl FnOnce(&XiaomiSignInLink)) -> io::Result<()> {
-    EuropeSession::sign_in(present).map(|_| ())
+pub fn verify_xiaomi_sign_in(interaction: &mut dyn ScaleSetupInteraction) -> io::Result<()> {
+    EuropeSession::sign_in(interaction).map(|_| ())
 }
 
 /// Uses browser sign-in to check the account's access to Xiaomi's Europe API.
 /// The check reads the account's device count and discards it.
-pub fn verify_xiaomi_cloud_europe(present: impl FnOnce(&XiaomiSignInLink)) -> io::Result<()> {
-    check_xiaomi_cloud_europe(present, || {})
-}
-
-pub(super) fn check_xiaomi_cloud_europe(
-    present: impl FnOnce(&XiaomiSignInLink),
-    on_signed_in: impl FnOnce(),
-) -> io::Result<()> {
-    let session = EuropeSession::sign_in(present)?;
-    on_signed_in();
-    session.verify_device_count()
+pub fn verify_xiaomi_cloud_europe(interaction: &mut dyn ScaleSetupInteraction) -> io::Result<()> {
+    EuropeSession::sign_in(interaction)?.verify_device_count()
 }
 
 pub(crate) struct EuropeSession {
@@ -60,18 +60,11 @@ pub(crate) struct EuropeSession {
 }
 
 impl EuropeSession {
-    pub(crate) fn sign_in(present: impl FnOnce(&XiaomiSignInLink)) -> io::Result<Self> {
-        Self::sign_in_while(&|| true, present)
-    }
-
-    pub(crate) fn sign_in_while(
-        keep_going: &impl Fn() -> bool,
-        present: impl FnOnce(&XiaomiSignInLink),
-    ) -> io::Result<Self> {
-        check_cancellation(keep_going)?;
+    pub(crate) fn sign_in(interaction: &mut dyn ScaleSetupInteraction) -> io::Result<Self> {
+        check_cancellation(interaction)?;
         let apartment = Apartment::initialize()?;
         let client = https::Session::new()?;
-        let account = sign_in(&client, keep_going, present)?;
+        let account = sign_in(&client, interaction)?;
         Ok(Self {
             client,
             account,
@@ -102,8 +95,7 @@ struct Authorization {
 
 fn sign_in(
     client: &https::Session,
-    keep_going: &impl Fn() -> bool,
-    present: impl FnOnce(&XiaomiSignInLink),
+    interaction: &mut dyn ScaleSetupInteraction,
 ) -> io::Result<CloudAccount> {
     let bootstrap = client
         .get(&bootstrap_url()?, REQUEST_TIMEOUT)
@@ -111,11 +103,11 @@ fn sign_in(
     bootstrap.require_ok("sign-in request")?;
     let challenge = Challenge::parse(&bootstrap.body)?;
     let deadline = Instant::now() + challenge.valid_for;
-    check_cancellation(keep_going)?;
-    present(&challenge.link);
+    check_cancellation(interaction)?;
+    interaction.present_xiaomi_sign_in(&challenge.link);
 
-    let authorization = wait_for_authorization(client, &challenge.poll, deadline, keep_going)?;
-    check_cancellation(keep_going)?;
+    let authorization = wait_for_authorization(client, &challenge.poll, deadline, interaction)?;
+    check_cancellation(interaction)?;
     let session = client
         .get(&authorization.callback, REQUEST_TIMEOUT)
         .map_err(|error| request_error("complete Xiaomi sign-in", error))?;
@@ -169,10 +161,10 @@ fn wait_for_authorization(
     client: &https::Session,
     poll: &Url,
     deadline: Instant,
-    keep_going: &impl Fn() -> bool,
+    interaction: &mut dyn ScaleSetupInteraction,
 ) -> io::Result<Authorization> {
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-        check_cancellation(keep_going)?;
+        check_cancellation(interaction)?;
         match client.get(poll, remaining.min(REQUEST_TIMEOUT)) {
             Ok(response) if response.status == 200 => {
                 return authorized_callback(&response.body);
@@ -190,7 +182,7 @@ fn wait_for_authorization(
         let remaining = deadline.saturating_duration_since(Instant::now());
         thread::sleep(remaining.min(Duration::from_millis(400)));
     }
-    check_cancellation(keep_going)?;
+    check_cancellation(interaction)?;
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         "the Xiaomi sign-in link expired",

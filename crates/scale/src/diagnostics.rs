@@ -3,9 +3,11 @@ use std::io;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use super::cloud_sign_in::check_xiaomi_cloud_europe;
+use super::cloud_sign_in::EuropeSession;
 use super::setup::{advertised_registration_status, registration_ready};
-use super::{Scale, XiaomiSignInLink, discover_scales, probe_setup_service};
+use super::{
+    Scale, ScaleScanObserver, ScaleSetupInteraction, Weight, discover_scales, probe_setup_service,
+};
 
 /// A read-only check of the prerequisites for S200 registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,49 +39,53 @@ pub enum SetupCheckStatus<'a> {
     Skipped(SetupCheck),
 }
 
+/// Receives the results of the setup diagnostics as they finish.
+pub trait SetupCheckObserver: ScaleSetupInteraction {
+    fn report_setup_check(&mut self, check: SetupCheck, status: SetupCheckStatus<'_>);
+}
+
 /// Checks the scale and account in one run, reporting each stage as it completes.
 /// Bluetooth and account checks run independently. The Europe API reuses the
 /// browser session from this run.
-pub fn check_scale_setup(
-    scan_time: Duration,
-    present_sign_in_link: impl FnOnce(&XiaomiSignInLink),
-    mut report: impl FnMut(SetupCheck, SetupCheckStatus<'_>),
-) {
-    check_bluetooth(scan_time, &mut report);
+pub fn check_scale_setup(scan_time: Duration, observer: &mut dyn SetupCheckObserver) {
+    check_bluetooth(scan_time, observer);
 
-    report(SetupCheck::BrowserSignIn, SetupCheckStatus::Started);
-    let mut sign_in_completed = false;
-    let cloud_result = check_xiaomi_cloud_europe(present_sign_in_link, || {
-        sign_in_completed = true;
-        report(SetupCheck::BrowserSignIn, SetupCheckStatus::Passed);
-        report(SetupCheck::EuropeApi, SetupCheckStatus::Started);
-    });
-    if sign_in_completed {
-        report(SetupCheck::EuropeApi, result_status(&cloud_result));
-    } else {
-        report(SetupCheck::BrowserSignIn, result_status(&cloud_result));
-        report(
-            SetupCheck::EuropeApi,
-            SetupCheckStatus::Skipped(SetupCheck::BrowserSignIn),
-        );
-    }
+    observer.report_setup_check(SetupCheck::BrowserSignIn, SetupCheckStatus::Started);
+    let session = match EuropeSession::sign_in(observer) {
+        Ok(session) => session,
+        Err(error) => {
+            observer
+                .report_setup_check(SetupCheck::BrowserSignIn, SetupCheckStatus::Failed(&error));
+            observer.report_setup_check(
+                SetupCheck::EuropeApi,
+                SetupCheckStatus::Skipped(SetupCheck::BrowserSignIn),
+            );
+            return;
+        }
+    };
+    observer.report_setup_check(SetupCheck::BrowserSignIn, SetupCheckStatus::Passed);
+    observer.report_setup_check(SetupCheck::EuropeApi, SetupCheckStatus::Started);
+    observer.report_setup_check(
+        SetupCheck::EuropeApi,
+        result_status(&session.verify_device_count()),
+    );
 }
 
-fn check_bluetooth(scan_time: Duration, report: &mut impl FnMut(SetupCheck, SetupCheckStatus<'_>)) {
-    report(SetupCheck::ScaleDiscovery, SetupCheckStatus::Started);
+fn check_bluetooth(scan_time: Duration, observer: &mut dyn SetupCheckObserver) {
+    observer.report_setup_check(SetupCheck::ScaleDiscovery, SetupCheckStatus::Started);
     let scale = match scan_scale(scan_time) {
         Ok(scale) => {
-            report(SetupCheck::ScaleDiscovery, SetupCheckStatus::Passed);
+            observer.report_setup_check(SetupCheck::ScaleDiscovery, SetupCheckStatus::Passed);
             scale
         }
         Err(error) => {
             let prerequisite = SetupCheck::ScaleDiscovery;
-            report(prerequisite, SetupCheckStatus::Failed(&error));
-            report(
+            observer.report_setup_check(prerequisite, SetupCheckStatus::Failed(&error));
+            observer.report_setup_check(
                 SetupCheck::RegistrationReadiness,
                 SetupCheckStatus::Skipped(prerequisite),
             );
-            report(
+            observer.report_setup_check(
                 SetupCheck::StandardAuthGatt,
                 SetupCheckStatus::Skipped(prerequisite),
             );
@@ -89,9 +95,9 @@ fn check_bluetooth(scan_time: Duration, report: &mut impl FnMut(SetupCheck, Setu
 
     let readiness = advertised_registration_status(&scale)
         .map_err(|blocker| io::Error::other(blocker.message()));
-    report(SetupCheck::RegistrationReadiness, result_status(&readiness));
+    observer.report_setup_check(SetupCheck::RegistrationReadiness, result_status(&readiness));
 
-    report(SetupCheck::StandardAuthGatt, SetupCheckStatus::Started);
+    observer.report_setup_check(SetupCheck::StandardAuthGatt, SetupCheckStatus::Started);
     let gatt = if scale.is_connectable() {
         probe_setup_service(&scale)
     } else {
@@ -99,13 +105,13 @@ fn check_bluetooth(scan_time: Duration, report: &mut impl FnMut(SetupCheck, Setu
             "the scale did not advertise a Bluetooth connection",
         ))
     };
-    report(SetupCheck::StandardAuthGatt, result_status(&gatt));
+    observer.report_setup_check(SetupCheck::StandardAuthGatt, result_status(&gatt));
 }
 
 fn scan_scale(scan_time: Duration) -> io::Result<Scale> {
-    let mut candidate: Option<Scale> = None;
-    discover_scales(scan_time, |scale| consider_scale(&mut candidate, scale))?;
-    candidate.ok_or_else(|| {
+    let mut scan = SetupDiagnosticScan::default();
+    discover_scales(scan_time, &mut scan)?;
+    scan.candidate.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "no S200 broadcast was detected during the scan",
@@ -113,18 +119,26 @@ fn scan_scale(scan_time: Duration) -> io::Result<Scale> {
     })
 }
 
-fn consider_scale(candidate: &mut Option<Scale>, scale: &Scale) -> ControlFlow<()> {
-    if registration_ready(scale) {
-        *candidate = Some(scale.clone());
-        return ControlFlow::Break(());
+#[derive(Default)]
+struct SetupDiagnosticScan {
+    candidate: Option<Scale>,
+}
+
+impl ScaleScanObserver for SetupDiagnosticScan {
+    fn scale_discovered(&mut self, scale: &Scale, _: Option<Weight>) -> ControlFlow<()> {
+        if registration_ready(scale) {
+            self.candidate = Some(scale.clone());
+            return ControlFlow::Break(());
+        }
+        if self
+            .candidate
+            .as_ref()
+            .is_none_or(|previous| scale_rank(scale) >= scale_rank(previous))
+        {
+            self.candidate = Some(scale.clone());
+        }
+        ControlFlow::Continue(())
     }
-    if candidate
-        .as_ref()
-        .is_none_or(|previous| scale_rank(scale) >= scale_rank(previous))
-    {
-        *candidate = Some(scale.clone());
-    }
-    ControlFlow::Continue(())
 }
 
 fn scale_rank(scale: &Scale) -> (bool, bool) {
@@ -142,8 +156,8 @@ fn result_status(result: &io::Result<()>) -> SetupCheckStatus<'_> {
 mod tests {
     use std::ops::ControlFlow;
 
-    use super::consider_scale;
-    use crate::{BluetoothAddress, Scale, ScaleSetupInfo, SignalStrength};
+    use super::SetupDiagnosticScan;
+    use crate::{BluetoothAddress, Scale, ScaleScanObserver, ScaleSetupInfo, SignalStrength};
 
     #[test]
     fn waits_for_a_scale_that_is_ready_to_register() {
@@ -158,16 +172,13 @@ mod tests {
         };
         let registered = advertised(1, 0x5b);
         let ready = advertised(2, 0x5a);
-        let mut candidate = None;
+        let mut scan = SetupDiagnosticScan::default();
         assert_eq!(
-            consider_scale(&mut candidate, &registered),
+            scan.scale_discovered(&registered, None),
             ControlFlow::Continue(())
         );
-        assert_eq!(candidate.as_ref(), Some(&registered));
-        assert_eq!(
-            consider_scale(&mut candidate, &ready),
-            ControlFlow::Break(())
-        );
-        assert_eq!(candidate, Some(ready));
+        assert_eq!(scan.candidate.as_ref(), Some(&registered));
+        assert_eq!(scan.scale_discovered(&ready, None), ControlFlow::Break(()));
+        assert_eq!(scan.candidate, Some(ready));
     }
 }

@@ -17,8 +17,8 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic;
 use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothLEDevice};
 
 use super::certificate_transfer::{
-    Channel, FRAGMENTS_RECEIVED, READY, Subscription, TRANSFER_FAILED, block_packets,
-    receive_framed_block, write_packet,
+    BlockPacketSource, Channel, FRAGMENTS_RECEIVED, READY, Subscription, TRANSFER_FAILED,
+    block_packets, receive_framed_block, write_packet,
 };
 use super::{setup_characteristic, setup_service};
 use crate::{Apartment, Scale, ScaleLoginToken, Weight, WeightReading, open_scale_device};
@@ -43,14 +43,25 @@ pub enum ConnectedWeightEvent {
     Reading(WeightReading),
 }
 
+/// Receives ready, live, and settled events from a connected scale.
+pub trait WeightSessionObserver {
+    /// Return `ControlFlow::Break` to end the session after an event.
+    fn on_weight_event(&mut self, event: ConnectedWeightEvent) -> ControlFlow<()>;
+
+    /// Checked before connecting and while a continuous session waits for packets.
+    fn should_read_weight(&mut self) -> bool {
+        true
+    }
+}
+
 /// Connects to an ms113 with its saved setup token and reads until a settled weight arrives.
 pub fn listen_for_connected_weight(
     scale: &Scale,
     token: &ScaleLoginToken,
     measurement_time: Duration,
-    report: impl FnMut(ConnectedWeightEvent) -> ControlFlow<()>,
+    observer: &mut dyn WeightSessionObserver,
 ) -> io::Result<()> {
-    read_connected_weights(scale, token, Some(measurement_time), || true, report)
+    read_connected_weights(scale, token, Some(measurement_time), observer)
 }
 
 /// Reads consecutive weights until the scale sleeps, the data channel is idle,
@@ -58,20 +69,18 @@ pub fn listen_for_connected_weight(
 pub fn watch_connected_weights(
     scale: &Scale,
     token: &ScaleLoginToken,
-    keep_listening: impl Fn() -> bool,
-    report: impl FnMut(ConnectedWeightEvent) -> ControlFlow<()>,
+    observer: &mut dyn WeightSessionObserver,
 ) -> io::Result<()> {
-    read_connected_weights(scale, token, None, keep_listening, report)
+    read_connected_weights(scale, token, None, observer)
 }
 
 fn read_connected_weights(
     scale: &Scale,
     token: &ScaleLoginToken,
     measurement_time: Option<Duration>,
-    keep_listening: impl Fn() -> bool,
-    mut report: impl FnMut(ConnectedWeightEvent) -> ControlFlow<()>,
+    observer: &mut dyn WeightSessionObserver,
 ) -> io::Result<()> {
-    if !keep_listening() {
+    if !observer.should_read_weight() {
         return Ok(());
     }
     let _apartment = Apartment::initialize()?;
@@ -89,7 +98,10 @@ fn read_connected_weights(
 
     let mtu = service.Session()?.MaxPduSize()?;
     let keys = login(&control, &auth, &auth_replies, mtu, token)?;
-    if report(ConnectedWeightEvent::Ready).is_break() {
+    if observer
+        .on_weight_event(ConnectedWeightEvent::Ready)
+        .is_break()
+    {
         return Ok(());
     }
     let deadline = measurement_time
@@ -103,15 +115,21 @@ fn read_connected_weights(
     let mut previous = None;
     loop {
         let payload = if let Some(deadline) = deadline {
-            receive_framed_block(&data, None, "weight packet", || {
-                read_notification(&data_replies, deadline, "a settled weight")
-                    .map(|(_, packet)| packet)
-            })?
+            receive_framed_block(
+                &data,
+                None,
+                "weight packet",
+                deadline,
+                &mut SettledWeightPackets(&data_replies),
+            )?
         } else {
             let idle_deadline = Instant::now() + CONNECTION_IDLE_TIMEOUT;
-            match receive_framed_block(&data, None, "weight packet", || {
-                next_live_packet(&device, &data_replies, idle_deadline, &keep_listening)
-            }) {
+            let mut source = LiveWeightPackets {
+                device: &device,
+                receiver: &data_replies,
+                observer,
+            };
+            match receive_framed_block(&data, None, "weight packet", idle_deadline, &mut source) {
                 Ok(payload) => payload,
                 Err(error)
                     if matches!(
@@ -130,7 +148,9 @@ fn read_connected_weights(
         if let Some(reading) = decode_weight(&cipher, keys.device_iv, &payload) {
             let settled = matches!(reading, WeightReading::Settled(_));
             if (settled || previous != Some(reading))
-                && report(ConnectedWeightEvent::Reading(reading)).is_break()
+                && observer
+                    .on_weight_event(ConnectedWeightEvent::Reading(reading))
+                    .is_break()
             {
                 return Ok(());
             }
@@ -142,29 +162,43 @@ fn read_connected_weights(
     }
 }
 
-fn next_live_packet(
-    device: &BluetoothLEDevice,
-    receiver: &Receiver<Notification>,
-    deadline: Instant,
-    keep_listening: &dyn Fn() -> bool,
-) -> io::Result<Vec<u8>> {
-    while keep_listening() {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
-        match receiver.recv_timeout(remaining.min(CONNECTION_CHECK_INTERVAL)) {
-            Ok((_, packet)) => return Ok(packet),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if device.ConnectionStatus()? == BluetoothConnectionStatus::Disconnected {
-                    return Err(io::Error::from(io::ErrorKind::NotConnected));
+struct SettledWeightPackets<'a>(&'a Receiver<Notification>);
+
+impl BlockPacketSource for SettledWeightPackets<'_> {
+    fn next_block_packet(&mut self, deadline: Instant, _: &str) -> io::Result<Vec<u8>> {
+        read_notification(self.0, deadline, "a settled weight").map(|(_, packet)| packet)
+    }
+}
+
+struct LiveWeightPackets<'a> {
+    device: &'a BluetoothLEDevice,
+    receiver: &'a Receiver<Notification>,
+    observer: &'a mut dyn WeightSessionObserver,
+}
+
+impl BlockPacketSource for LiveWeightPackets<'_> {
+    fn next_block_packet(&mut self, deadline: Instant, _: &str) -> io::Result<Vec<u8>> {
+        while self.observer.should_read_weight() {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+            match self
+                .receiver
+                .recv_timeout(remaining.min(CONNECTION_CHECK_INTERVAL))
+            {
+                Ok((_, packet)) => return Ok(packet),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if self.device.ConnectionStatus()? == BluetoothConnectionStatus::Disconnected {
+                        return Err(io::Error::from(io::ErrorKind::NotConnected));
+                    }
                 }
             }
         }
+        Err(io::Error::from(io::ErrorKind::Interrupted))
     }
-    Err(io::Error::from(io::ErrorKind::Interrupted))
 }
 
 fn login(
@@ -251,9 +285,7 @@ impl LoginReplies<'_> {
         stage: &str,
     ) -> io::Result<Vec<u8>> {
         let deadline = Instant::now() + LOGIN_TIMEOUT;
-        receive_framed_block(auth, Some(kind), stage, || {
-            self.auth_packet(deadline, stage)
-        })
+        receive_framed_block(auth, Some(kind), stage, deadline, self)
     }
 
     fn send_block(
@@ -277,6 +309,12 @@ impl LoginReplies<'_> {
         let deadline = Instant::now() + LOGIN_TIMEOUT;
         while self.auth_packet(deadline, stage)? != expected {}
         Ok(())
+    }
+}
+
+impl BlockPacketSource for LoginReplies<'_> {
+    fn next_block_packet(&mut self, deadline: Instant, stage: &str) -> io::Result<Vec<u8>> {
+        self.auth_packet(deadline, stage)
     }
 }
 

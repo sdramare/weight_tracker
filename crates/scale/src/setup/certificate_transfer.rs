@@ -120,20 +120,39 @@ pub fn send_setup_test_certificate(
             format!("could not read local test certificate at {TEST_CERTIFICATE_PATH}: {error}"),
         )
     })?;
-    let (reply, credentials) = register_with(scale, |registration, _stored_device_id| {
+    let authorizer = TestCertificateAuthorizer {
+        address: scale.address(),
+        credentials_directory,
+        certificate,
+    };
+    let (reply, credentials) = register_with(scale, authorizer)?;
+    finish_credentials(credentials, reply)?;
+    Ok(reply)
+}
+
+struct TestCertificateAuthorizer<'a> {
+    address: crate::BluetoothAddress,
+    credentials_directory: &'a Path,
+    certificate: Vec<u8>,
+}
+
+impl RegistrationAuthorizer for TestCertificateAuthorizer<'_> {
+    fn authorize_registration(
+        self,
+        registration: &Registration,
+        _: Option<CloudDeviceId>,
+    ) -> io::Result<(RegistrationProof, PathBuf)> {
         let encrypted_id = registration.encrypted_device_id()?;
         let credentials =
-            registration.save_trial_credentials(credentials_directory, scale.address())?;
+            registration.save_trial_credentials(self.credentials_directory, self.address)?;
         Ok((
             RegistrationProof {
                 encrypted_id,
-                certificate,
+                certificate: self.certificate,
             },
             credentials,
         ))
-    })?;
-    finish_credentials(credentials, reply)?;
-    Ok(reply)
+    }
 }
 
 pub(super) fn finish_credentials(
@@ -168,6 +187,14 @@ pub(super) fn finish_credentials(
 pub(super) struct RegistrationProof {
     pub(super) encrypted_id: Vec<u8>,
     pub(super) certificate: Vec<u8>,
+}
+
+pub(super) trait RegistrationAuthorizer {
+    fn authorize_registration(
+        self,
+        registration: &Registration,
+        stored_device_id: Option<CloudDeviceId>,
+    ) -> io::Result<(RegistrationProof, PathBuf)>;
 }
 
 struct SetupLink {
@@ -215,10 +242,10 @@ impl SetupLink {
     }
 }
 
-pub(super) fn register_with<T>(
+pub(super) fn register_with(
     scale: &Scale,
-    authorize: impl FnOnce(&Registration, Option<CloudDeviceId>) -> io::Result<(RegistrationProof, T)>,
-) -> io::Result<(SetupCertificateReply, T)> {
+    authorizer: impl RegistrationAuthorizer,
+) -> io::Result<(SetupCertificateReply, PathBuf)> {
     registration_status(scale)
         .map_err(|blocker| io::Error::new(io::ErrorKind::InvalidInput, blocker.message()))?;
     let link = SetupLink::open(scale)?;
@@ -250,7 +277,8 @@ pub(super) fn register_with<T>(
     require_ack(replies, FRAGMENTS_RECEIVED, "app public key")?;
     let peer = receive_block(auth, replies, PUBLIC_KEY_BLOCK, "scale public key")?;
     let registration = exchange.finish(&peer)?;
-    let (proof, state) = authorize(&registration, stored_device_id)?;
+    let (proof, credentials) =
+        authorizer.authorize_registration(&registration, stored_device_id)?;
 
     write_packet(control, &CONFIRM_REGISTRATION)?;
     transmit_block(
@@ -286,7 +314,7 @@ pub(super) fn register_with<T>(
             "the certificate was sent, but the scale gave no transfer acknowledgment or registration result",
         )),
     }?;
-    Ok((reply, state))
+    Ok((reply, credentials))
 }
 
 fn transmit_block(
@@ -331,19 +359,29 @@ fn receive_block(
     stage: &str,
 ) -> io::Result<Vec<u8>> {
     let deadline = Instant::now() + REPLY_TIMEOUT;
-    receive_framed_block(auth, Some(kind), stage, || {
-        next_auth_packet(replies, deadline, stage)
-    })
+    receive_framed_block(
+        auth,
+        Some(kind),
+        stage,
+        deadline,
+        &mut RegistrationPackets(replies),
+    )
+}
+
+/// Supplies packets for one framed transfer while handling channel-specific replies.
+pub(super) trait BlockPacketSource {
+    fn next_block_packet(&mut self, deadline: Instant, stage: &str) -> io::Result<Vec<u8>>;
 }
 
 pub(super) fn receive_framed_block(
     characteristic: &GattCharacteristic,
     expected: Option<u8>,
     stage: &str,
-    mut next: impl FnMut() -> io::Result<Vec<u8>>,
+    deadline: Instant,
+    source: &mut impl BlockPacketSource,
 ) -> io::Result<Vec<u8>> {
     loop {
-        let packet = next()?;
+        let packet = source.next_block_packet(deadline, stage)?;
         match packet.as_slice() {
             [0, 0, 2, block, data @ ..] if expected.is_none_or(|kind| *block == kind) => {
                 write_packet(characteristic, &SINGLE_PACKET_RECEIVED)?;
@@ -360,7 +398,7 @@ pub(super) fn receive_framed_block(
                 write_packet(characteristic, &READY)?;
                 let mut data = Vec::new();
                 for index in 1..=count {
-                    let fragment = next()?;
+                    let fragment = source.next_block_packet(deadline, stage)?;
                     if !fragment.starts_with(&index.to_le_bytes()) || fragment.len() <= 2 {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -377,34 +415,34 @@ pub(super) fn receive_framed_block(
     }
 }
 
-fn next_auth_packet(
-    replies: &Receiver<(Channel, Vec<u8>)>,
-    deadline: Instant,
-    stage: &str,
-) -> io::Result<Vec<u8>> {
-    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-        match replies.recv_timeout(remaining) {
-            Ok((Channel::Auth, packet)) => {
-                if packet.starts_with(&TRANSFER_FAILED) {
-                    return Err(transfer_error(stage));
+struct RegistrationPackets<'a>(&'a Receiver<(Channel, Vec<u8>)>);
+
+impl BlockPacketSource for RegistrationPackets<'_> {
+    fn next_block_packet(&mut self, deadline: Instant, stage: &str) -> io::Result<Vec<u8>> {
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match self.0.recv_timeout(remaining) {
+                Ok((Channel::Auth, packet)) => {
+                    if packet.starts_with(&TRANSFER_FAILED) {
+                        return Err(transfer_error(stage));
+                    }
+                    return Ok(packet);
                 }
-                return Ok(packet);
-            }
-            Ok((Channel::Control, packet)) => {
-                if let Some(reply) = registration_reply(&packet) {
-                    return Err(io::Error::other(format!(
-                        "while waiting for {stage}, {reply}"
-                    )));
+                Ok((Channel::Control, packet)) => {
+                    if let Some(reply) = registration_reply(&packet) {
+                        return Err(io::Error::other(format!(
+                            "while waiting for {stage}, {reply}"
+                        )));
+                    }
                 }
+                Ok((Channel::Data, _)) => {}
+                Err(_) => break,
             }
-            Ok((Channel::Data, _)) => {}
-            Err(_) => break,
         }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("the scale did not send {stage}"),
+        ))
     }
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        format!("the scale did not send {stage}"),
-    ))
 }
 
 type BlockPackets = ([u8; 6], Vec<Vec<u8>>);

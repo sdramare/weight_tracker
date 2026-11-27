@@ -19,6 +19,22 @@ const STOP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const CANDIDATE_LIFETIME: Duration = Duration::from_secs(30);
 const XIAOMI_COMPANY_ID: u16 = 0x038f;
 
+/// Receives Bluetooth discoveries and controls how long the scan stays active.
+pub trait ScaleScanObserver {
+    /// `broadcast_weight` is the weight from this packet. `scale.weight()` retains the latest value.
+    /// Return `ControlFlow::Break` to stop the scan after a discovery.
+    fn scale_discovered(
+        &mut self,
+        scale: &Scale,
+        broadcast_weight: Option<Weight>,
+    ) -> ControlFlow<()>;
+
+    /// Checked before waiting for the next advertisement.
+    fn should_scan(&mut self) -> bool {
+        true
+    }
+}
+
 struct Advertisement {
     address: BluetoothAddress,
     is_s200: bool,
@@ -36,23 +52,18 @@ struct Candidate {
     last_seen: Instant,
 }
 
-enum ScanWindow<'a> {
-    Timed(Instant, &'a dyn Fn() -> bool),
-    Continuous(&'a dyn Fn() -> bool),
+enum ScanWindow {
+    Timed(Instant),
+    Continuous,
 }
 
-impl ScanWindow<'_> {
+impl ScanWindow {
     fn next_wait(&self) -> Option<Duration> {
         match self {
-            Self::Timed(deadline, keep_listening) => {
-                if !keep_listening() {
-                    return None;
-                }
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .map(|remaining| remaining.min(STOP_CHECK_INTERVAL))
-            }
-            Self::Continuous(keep_listening) => keep_listening().then_some(STOP_CHECK_INTERVAL),
+            Self::Timed(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .map(|remaining| remaining.min(STOP_CHECK_INTERVAL)),
+            Self::Continuous => Some(STOP_CHECK_INTERVAL),
         }
     }
 }
@@ -130,49 +141,45 @@ impl Drop for Watcher {
 pub(super) fn discover(
     duration: Duration,
     decoder: Option<WeightDecoder>,
-    keep_listening: impl Fn() -> bool,
-    mut on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+    observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
     let deadline = Instant::now()
         .checked_add(duration)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid scan duration"))?;
-    run_scan(
-        ScanWindow::Timed(deadline, &keep_listening),
-        decoder,
-        |scale, _| on_scale(scale),
-    )
+    run_scan(ScanWindow::Timed(deadline), decoder, observer)
 }
 
 pub(super) fn watch(
     decoder: Option<WeightDecoder>,
-    keep_listening: impl Fn() -> bool,
-    on_scale: impl FnMut(&Scale, Option<Weight>) -> ControlFlow<()>,
+    observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
-    run_scan(ScanWindow::Continuous(&keep_listening), decoder, on_scale)
+    run_scan(ScanWindow::Continuous, decoder, observer)
 }
 
 fn run_scan(
-    window: ScanWindow<'_>,
+    window: ScanWindow,
     decoder: Option<WeightDecoder>,
-    on_scale: impl FnMut(&Scale, Option<Weight>) -> ControlFlow<()>,
+    observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
     let (sender, receiver) = mpsc::channel();
     let watcher = Watcher::start(sender, decoder)?;
-    let result = wait_for_scales(window, receiver, on_scale);
+    let result = wait_for_scales(window, receiver, observer);
     result.and(watcher.stop())
 }
 
 fn wait_for_scales(
-    window: ScanWindow<'_>,
+    window: ScanWindow,
     receiver: Receiver<Event>,
-    mut on_scale: impl FnMut(&Scale, Option<Weight>) -> ControlFlow<()>,
+    observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
     let mut candidates = HashMap::<BluetoothAddress, Candidate>::new();
     let mut next_prune = Instant::now() + CANDIDATE_LIFETIME;
 
-    while let Some(remaining) = window.next_wait() {
+    while observer.should_scan()
+        && let Some(remaining) = window.next_wait()
+    {
         let now = Instant::now();
-        if matches!(&window, ScanWindow::Continuous(_)) && now >= next_prune {
+        if matches!(window, ScanWindow::Continuous) && now >= next_prune {
             candidates.retain(|_, candidate| {
                 now.duration_since(candidate.last_seen) < CANDIDATE_LIFETIME
             });
@@ -200,11 +207,13 @@ fn wait_for_scales(
                         });
                 candidate.last_seen = Instant::now();
                 let changed = candidate.update(advertisement);
-                let fresh_weight = matches!(&window, ScanWindow::Continuous(_))
+                let fresh_weight = matches!(window, ScanWindow::Continuous)
                     && candidate.is_s200
                     && received_weight.is_some();
                 if (changed || fresh_weight)
-                    && on_scale(&candidate.scale, received_weight).is_break()
+                    && observer
+                        .scale_discovered(&candidate.scale, received_weight)
+                        .is_break()
                 {
                     break;
                 }
@@ -390,23 +399,32 @@ fn inspect_service_data(
 mod tests {
     use super::{
         Advertisement, BluetoothAddress, BluetoothAddressType, ControlFlow, Duration, Event,
-        Instant, ScanWindow, SignalStrength, Weight, mpsc, wait_for_scales,
+        Instant, Scale, ScaleScanObserver, ScanWindow, SignalStrength, Weight, mpsc,
+        wait_for_scales,
     };
-    use std::cell::Cell;
 
     #[test]
     fn continuous_scan_stays_active_through_idle_wait_and_honors_cancellation() {
+        #[derive(Default)]
+        struct IdleScan {
+            waits: usize,
+        }
+
+        impl ScaleScanObserver for IdleScan {
+            fn should_scan(&mut self) -> bool {
+                self.waits += 1;
+                self.waits <= 2
+            }
+
+            fn scale_discovered(&mut self, _: &Scale, _: Option<Weight>) -> ControlFlow<()> {
+                ControlFlow::Continue(())
+            }
+        }
+
         let (_sender, receiver) = mpsc::channel();
-        let waits = Cell::new(0);
-        let keep_listening = || {
-            waits.set(waits.get() + 1);
-            waits.get() <= 2
-        };
-        wait_for_scales(ScanWindow::Continuous(&keep_listening), receiver, |_, _| {
-            ControlFlow::Continue(())
-        })
-        .unwrap();
-        assert_eq!(waits.get(), 3);
+        let mut scan = IdleScan::default();
+        wait_for_scales(ScanWindow::Continuous, receiver, &mut scan).unwrap();
+        assert_eq!(scan.waits, 3);
     }
 
     #[test]
@@ -435,12 +453,14 @@ mod tests {
                 .unwrap();
         }
 
-        let mut updates = Vec::new();
-        wait_for_scales(
-            ScanWindow::Timed(Instant::now() + Duration::from_secs(1), &|| true),
-            receiver,
-            |scale, _| {
-                updates.push((
+        #[derive(Default)]
+        struct DiscoveryLog {
+            updates: Vec<(BluetoothAddress, bool, String, Option<Weight>)>,
+        }
+
+        impl ScaleScanObserver for DiscoveryLog {
+            fn scale_discovered(&mut self, scale: &Scale, _: Option<Weight>) -> ControlFlow<()> {
+                self.updates.push((
                     scale.address(),
                     scale.is_connectable(),
                     scale.name().to_string(),
@@ -451,11 +471,18 @@ mod tests {
                 } else {
                     ControlFlow::Continue(())
                 }
-            },
+            }
+        }
+
+        let mut scan = DiscoveryLog::default();
+        wait_for_scales(
+            ScanWindow::Timed(Instant::now() + Duration::from_secs(1)),
+            receiver,
+            &mut scan,
         )
         .unwrap();
         assert_eq!(
-            updates,
+            scan.updates,
             [
                 (
                     BluetoothAddress(12),

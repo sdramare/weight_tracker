@@ -20,14 +20,17 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatu
 use windows::Devices::Bluetooth::{BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
-pub use cloud_sign_in::{XiaomiSignInLink, verify_xiaomi_cloud_europe, verify_xiaomi_sign_in};
-pub use diagnostics::{SetupCheck, SetupCheckStatus, check_scale_setup};
+pub use cloud_sign_in::{
+    ScaleSetupInteraction, XiaomiSignInLink, verify_xiaomi_cloud_europe, verify_xiaomi_sign_in,
+};
+pub use diagnostics::{SetupCheck, SetupCheckObserver, SetupCheckStatus, check_scale_setup};
+pub use discovery::ScaleScanObserver;
 pub use login_keys::{SavedScaleLogins, ScaleLoginToken, default_registration_directory};
 pub use setup::{
-    ConnectedWeightEvent, RegisteredScale, RegistrationEvent, RegistrationStep, ScaleSetupInfo,
-    SetupCertificateReply, SetupProfile, find_registration_scale, listen_for_connected_weight,
-    probe_setup_profile, probe_setup_service, register_scale_europe, register_scale_europe_while,
-    send_setup_test_certificate, watch_connected_weights,
+    ConnectedWeightEvent, RegisteredScale, RegistrationEvent, RegistrationObserver,
+    RegistrationStep, ScaleSetupInfo, SetupCertificateReply, SetupProfile, WeightSessionObserver,
+    find_registration_scale, listen_for_connected_weight, probe_setup_profile, probe_setup_service,
+    register_scale_europe, send_setup_test_certificate, watch_connected_weights,
 };
 pub use types::{
     BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight, WeightReading,
@@ -37,11 +40,11 @@ use weight::WeightDecoder;
 
 pub const MODEL_NAME: ScaleName<'static> = ScaleName("Xiaomi Smart Scale S200");
 
-fn check_cancellation(keep_going: &impl Fn() -> bool) -> io::Result<()> {
-    if keep_going() {
-        Ok(())
-    } else {
+fn check_cancellation(interaction: &mut dyn ScaleSetupInteraction) -> io::Result<()> {
+    if interaction.setup_cancelled() {
         Err(io::ErrorKind::Interrupted.into())
+    } else {
+        Ok(())
     }
 }
 
@@ -85,58 +88,62 @@ impl Scale {
 }
 
 /// Reports each recognized scale and subsequent changes to its advertisement data.
-/// The callback can end discovery early by returning `ControlFlow::Break`.
-pub fn discover_scales(
-    duration: Duration,
-    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
-) -> io::Result<()> {
+/// The observer can end discovery early by returning `ControlFlow::Break`.
+pub fn discover_scales(duration: Duration, observer: &mut dyn ScaleScanObserver) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
-    discovery::discover(duration, None, || true, on_scale)
+    discovery::discover(duration, None, observer)
 }
 
 /// Discovers scales and reports weights authenticated with the supplied MiBeacon key.
 pub fn discover_scales_with_weight(
     duration: Duration,
     key: &ScaleBindKey,
-    on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
+    observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
-    discovery::discover(duration, Some(WeightDecoder::new(key)), || true, on_scale)
+    discovery::discover(duration, Some(WeightDecoder::new(key)), observer)
 }
 
 /// Watches for scales until stopped by the caller. An optional bind key enables
-/// authenticated MiBeacon weight readings. The second callback argument contains
-/// the weight carried by the current advertisement, when present.
+/// authenticated MiBeacon weight readings from the current advertisement.
 pub fn watch_scales(
     key: Option<&ScaleBindKey>,
-    keep_listening: impl Fn() -> bool,
-    on_scale: impl FnMut(&Scale, Option<Weight>) -> ControlFlow<()>,
+    observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
-    discovery::watch(key.map(WeightDecoder::new), keep_listening, on_scale)
+    discovery::watch(key.map(WeightDecoder::new), observer)
 }
 
 /// Waits for the first recognized scale that advertises a connection.
 pub fn find_connectable_scale(duration: Duration) -> io::Result<Scale> {
-    let mut target = None;
-    let mut detected = false;
-    discover_scales(duration, |scale| {
-        detected = true;
-        if scale.is_connectable() {
-            target = Some(scale.clone());
-            return ControlFlow::Break(());
-        }
-        ControlFlow::Continue(())
-    })?;
+    let mut scan = ConnectableScaleSearch::default();
+    discover_scales(duration, &mut scan)?;
 
-    target.ok_or_else(|| {
-        let message = if detected {
+    scan.target.ok_or_else(|| {
+        let message = if scan.detected {
             "the S200 was detected, but did not offer a connection. Close Xiaomi Home and wake the scale again"
         } else {
             "no Xiaomi Smart Scale S200 was detected. Keep it near the PC and wake it during the scan"
         };
         io::Error::new(io::ErrorKind::NotFound, message)
     })
+}
+
+#[derive(Default)]
+struct ConnectableScaleSearch {
+    target: Option<Scale>,
+    detected: bool,
+}
+
+impl ScaleScanObserver for ConnectableScaleSearch {
+    fn scale_discovered(&mut self, scale: &Scale, _: Option<Weight>) -> ControlFlow<()> {
+        self.detected = true;
+        if scale.is_connectable() {
+            self.target = Some(scale.clone());
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 /// Connects to the scale and returns the UUIDs of its GATT services.

@@ -1,4 +1,3 @@
-use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::io;
 use std::ops::ControlFlow;
@@ -10,16 +9,19 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
 use xiaomi_s200::{
-    BluetoothAddress, ConnectedWeightEvent, MODEL_NAME, SavedScaleLogins, Scale, ScaleBindKey,
-    Weight, WeightReading, watch_connected_weights, watch_scales,
+    BluetoothAddress, ConnectedWeightEvent, MODEL_NAME, RegisteredScale, RegistrationEvent,
+    RegistrationObserver, SavedScaleLogins, Scale, ScaleBindKey, ScaleScanObserver,
+    ScaleSetupInteraction, Weight, WeightReading, WeightSessionObserver, XiaomiSignInLink,
+    default_registration_directory, register_scale_europe, watch_connected_weights, watch_scales,
 };
 
 use super::history::{HistoryMonitor, WeightEntry};
-use super::scale_setup::{self, SetupDialog, SetupRequest, SetupUpdate};
+use super::scale_setup::{SetupDialog, SetupRequest, SetupUpdate};
 use super::{tray, weight_plot};
 
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const HISTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const SETUP_SCAN_TIME: Duration = Duration::from_secs(30);
 const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 243);
 const INK: Color32 = Color32::from_rgb(19, 43, 38);
 const MUTED: Color32 = Color32::from_rgb(69, 93, 84);
@@ -261,137 +263,255 @@ fn monitor_scales(
     sender: &Sender<MonitorEvent>,
     context: &egui::Context,
 ) {
-    let post = |event| {
-        if sender.send(event).is_err() {
-            return ControlFlow::Break(());
-        }
-        context.request_repaint();
-        ControlFlow::Continue(())
-    };
-    let history = RefCell::new(HistoryMonitor::default());
-    let next_history_refresh = Cell::new(Instant::now());
-    let history_error = RefCell::new(None);
-    let report_history = |result: io::Result<Option<Vec<WeightEntry>>>| {
-        let mut previous_error = history_error.borrow_mut();
-        match result {
-            Ok(Some(entries)) => {
-                *previous_error = None;
-                post(MonitorEvent::HistoryLoaded(entries))
-            }
-            Ok(None) if previous_error.take().is_some() => post(MonitorEvent::HistoryError(None)),
-            Ok(None) => ControlFlow::Continue(()),
-            Err(error) => {
-                let error = error.to_string();
-                if previous_error.as_ref() == Some(&error) {
-                    return ControlFlow::Continue(());
-                }
-                *previous_error = Some(error.clone());
-                post(MonitorEvent::HistoryError(Some(error)))
-            }
-        }
-    };
-    let keep_listening = || {
-        if !listening.load(Ordering::Relaxed) {
-            return false;
-        }
-        let now = Instant::now();
-        if now < next_history_refresh.get() {
-            return true;
-        }
-        next_history_refresh.set(now + HISTORY_REFRESH_INTERVAL);
-        report_history(history.borrow_mut().refresh()).is_continue()
-    };
-    let record_weight = |weight| report_history(history.borrow_mut().record(weight));
-    let pending_setup = RefCell::new(None);
-    let keep_monitoring = || {
-        let waiting = pending_setup.borrow().is_some();
-        if !waiting && let Ok(request) = setup_commands.try_recv() {
-            pending_setup.replace(Some(request));
-        }
-        pending_setup.borrow().is_none() && keep_listening()
-    };
-    let (mut logins, mut bind_key, hints) = monitor_credentials();
-    if post(MonitorEvent::WeightHints(hints)).is_break() {
-        return;
+    ScaleMonitor {
+        setup_commands,
+        listening,
+        sender,
+        context,
+        history: HistoryMonitor::default(),
+        next_history_refresh: Instant::now(),
+        history_error: None,
+        pending_setup: None,
     }
-    while keep_listening() {
-        if let Some(request) = pending_setup
-            .take()
-            .or_else(|| setup_commands.try_recv().ok())
-        {
-            if post(MonitorEvent::Status(MonitorStatus::SettingUp)).is_break() {
-                return;
-            }
-            let result = scale_setup::run(request, keep_listening, |event| {
-                let _ = post(MonitorEvent::Setup(event));
-            });
-            let hints;
-            (logins, bind_key, hints) = monitor_credentials();
-            if post(MonitorEvent::WeightHints(hints)).is_break()
-                || post(MonitorEvent::Setup(SetupUpdate::Finished(result))).is_break()
-            {
-                return;
-            }
-            continue;
-        }
-        if post(MonitorEvent::Status(MonitorStatus::Listening)).is_break() {
+    .run();
+}
+
+struct ScaleMonitor<'a> {
+    setup_commands: Receiver<SetupRequest>,
+    listening: &'a AtomicBool,
+    sender: &'a Sender<MonitorEvent>,
+    context: &'a egui::Context,
+    history: HistoryMonitor,
+    next_history_refresh: Instant,
+    history_error: Option<String>,
+    pending_setup: Option<SetupRequest>,
+}
+
+impl ScaleMonitor<'_> {
+    fn run(&mut self) {
+        let (mut logins, mut bind_key, hints) = monitor_credentials();
+        if self.post(MonitorEvent::WeightHints(hints)).is_break() {
             return;
         }
-        let mut target = None;
-        let result =
-            watch_scales(
-                bind_key.as_ref(),
-                keep_monitoring,
-                |scale, broadcast_weight| {
-                    post(MonitorEvent::Scale(scale.clone()))?;
-                    if let Some(weight) = broadcast_weight {
-                        record_weight(weight)?;
-                    }
-                    if scale.is_connectable() && logins.token_for(scale).is_some() {
-                        target = Some(scale.clone());
-                        return ControlFlow::Break(());
-                    }
-                    ControlFlow::Continue(())
-                },
-            )
-            .and_then(|()| {
-                if let Some(scale) = target
-                    && let Some(token) = logins.token_for(&scale)
-                    && keep_monitoring()
-                    && post(MonitorEvent::Status(MonitorStatus::Connecting)).is_continue()
+        while self.keep_running() {
+            if let Some(request) = self
+                .pending_setup
+                .take()
+                .or_else(|| self.setup_commands.try_recv().ok())
+            {
+                if self
+                    .post(MonitorEvent::Status(MonitorStatus::SettingUp))
+                    .is_break()
                 {
-                    return watch_connected_weights(&scale, token, keep_monitoring, |event| {
-                        match event {
-                            ConnectedWeightEvent::Ready => {
-                                post(MonitorEvent::Status(MonitorStatus::Connected))
-                            }
-                            ConnectedWeightEvent::Reading(reading) => {
-                                post(MonitorEvent::Weight(scale.address(), reading))?;
-                                if let WeightReading::Settled(weight) = reading {
-                                    record_weight(weight)?;
-                                }
-                                ControlFlow::Continue(())
-                            }
-                        }
-                    });
+                    return;
                 }
-                Ok(())
-            });
-        if let Err(error) = result {
-            if pending_setup.borrow().is_some() {
+                let result = self.register_scale(request);
+                let hints;
+                (logins, bind_key, hints) = monitor_credentials();
+                if self.post(MonitorEvent::WeightHints(hints)).is_break()
+                    || self
+                        .post(MonitorEvent::Setup(SetupUpdate::Finished(result)))
+                        .is_break()
+                {
+                    return;
+                }
                 continue;
             }
-            if !keep_listening()
-                || post(MonitorEvent::Status(MonitorStatus::Retrying(
-                    error.to_string(),
-                )))
+            if self
+                .post(MonitorEvent::Status(MonitorStatus::Listening))
                 .is_break()
             {
                 return;
             }
-            if let Ok(request) = setup_commands.recv_timeout(RETRY_DELAY) {
-                pending_setup.replace(Some(request));
+            if let Err(error) = self.monitor_weight(&logins, bind_key.as_ref()) {
+                if self.pending_setup.is_some() {
+                    continue;
+                }
+                if !self.keep_running()
+                    || self
+                        .post(MonitorEvent::Status(MonitorStatus::Retrying(
+                            error.to_string(),
+                        )))
+                        .is_break()
+                {
+                    return;
+                }
+                self.pending_setup = self.setup_commands.recv_timeout(RETRY_DELAY).ok();
             }
+        }
+    }
+
+    fn monitor_weight(
+        &mut self,
+        logins: &SavedScaleLogins,
+        bind_key: Option<&ScaleBindKey>,
+    ) -> io::Result<()> {
+        let mut scan = DesktopScaleScan {
+            monitor: self,
+            logins,
+            target: None,
+        };
+        watch_scales(bind_key, &mut scan)?;
+        if let Some(scale) = scan.target
+            && let Some(token) = logins.token_for(&scale)
+            && self.keep_monitoring()
+            && self
+                .post(MonitorEvent::Status(MonitorStatus::Connecting))
+                .is_continue()
+        {
+            let mut session = DesktopWeightSession {
+                monitor: self,
+                address: scale.address(),
+            };
+            watch_connected_weights(&scale, token, &mut session)?;
+        }
+        Ok(())
+    }
+
+    fn register_scale(&mut self, request: SetupRequest) -> io::Result<RegisteredScale> {
+        let directory = default_registration_directory()?;
+        let mut setup = DesktopRegistration {
+            monitor: self,
+            request,
+        };
+        register_scale_europe(SETUP_SCAN_TIME, &directory, &mut setup)
+    }
+
+    fn post(&self, event: MonitorEvent) -> ControlFlow<()> {
+        if self.sender.send(event).is_err() {
+            return ControlFlow::Break(());
+        }
+        self.context.request_repaint();
+        ControlFlow::Continue(())
+    }
+
+    fn report_history(&mut self, result: io::Result<Option<Vec<WeightEntry>>>) -> ControlFlow<()> {
+        match result {
+            Ok(Some(entries)) => {
+                self.history_error = None;
+                self.post(MonitorEvent::HistoryLoaded(entries))
+            }
+            Ok(None) if self.history_error.take().is_some() => {
+                self.post(MonitorEvent::HistoryError(None))
+            }
+            Ok(None) => ControlFlow::Continue(()),
+            Err(error) => {
+                let error = error.to_string();
+                if self.history_error.as_ref() == Some(&error) {
+                    return ControlFlow::Continue(());
+                }
+                self.history_error = Some(error.clone());
+                self.post(MonitorEvent::HistoryError(Some(error)))
+            }
+        }
+    }
+
+    fn record_weight(&mut self, weight: Weight) -> ControlFlow<()> {
+        let result = self.history.record(weight);
+        self.report_history(result)
+    }
+
+    fn keep_running(&mut self) -> bool {
+        if !self.listening.load(Ordering::Relaxed) {
+            return false;
+        }
+        let now = Instant::now();
+        if now < self.next_history_refresh {
+            return true;
+        }
+        self.next_history_refresh = now + HISTORY_REFRESH_INTERVAL;
+        let result = self.history.refresh();
+        self.report_history(result).is_continue()
+    }
+
+    fn keep_monitoring(&mut self) -> bool {
+        if self.pending_setup.is_none() {
+            self.pending_setup = self.setup_commands.try_recv().ok();
+        }
+        self.pending_setup.is_none() && self.keep_running()
+    }
+}
+
+struct DesktopScaleScan<'a, 'worker> {
+    monitor: &'a mut ScaleMonitor<'worker>,
+    logins: &'a SavedScaleLogins,
+    target: Option<Scale>,
+}
+
+impl ScaleScanObserver for DesktopScaleScan<'_, '_> {
+    fn should_scan(&mut self) -> bool {
+        self.monitor.keep_monitoring()
+    }
+
+    fn scale_discovered(
+        &mut self,
+        scale: &Scale,
+        broadcast_weight: Option<Weight>,
+    ) -> ControlFlow<()> {
+        self.monitor.post(MonitorEvent::Scale(scale.clone()))?;
+        if let Some(weight) = broadcast_weight {
+            self.monitor.record_weight(weight)?;
+        }
+        if scale.is_connectable() && self.logins.token_for(scale).is_some() {
+            self.target = Some(scale.clone());
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+struct DesktopWeightSession<'a, 'worker> {
+    monitor: &'a mut ScaleMonitor<'worker>,
+    address: BluetoothAddress,
+}
+
+impl WeightSessionObserver for DesktopWeightSession<'_, '_> {
+    fn should_read_weight(&mut self) -> bool {
+        self.monitor.keep_monitoring()
+    }
+
+    fn on_weight_event(&mut self, event: ConnectedWeightEvent) -> ControlFlow<()> {
+        match event {
+            ConnectedWeightEvent::Ready => self
+                .monitor
+                .post(MonitorEvent::Status(MonitorStatus::Connected)),
+            ConnectedWeightEvent::Reading(reading) => {
+                self.monitor
+                    .post(MonitorEvent::Weight(self.address, reading))?;
+                if let WeightReading::Settled(weight) = reading {
+                    self.monitor.record_weight(weight)?;
+                }
+                ControlFlow::Continue(())
+            }
+        }
+    }
+}
+
+struct DesktopRegistration<'a, 'worker> {
+    monitor: &'a mut ScaleMonitor<'worker>,
+    request: SetupRequest,
+}
+
+impl ScaleSetupInteraction for DesktopRegistration<'_, '_> {
+    fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink) {
+        let _ = self
+            .monitor
+            .post(MonitorEvent::Setup(SetupUpdate::SignInLink(
+                link.to_string(),
+            )));
+    }
+
+    fn setup_cancelled(&mut self) -> bool {
+        self.request.is_cancelled() || !self.monitor.keep_running()
+    }
+}
+
+impl RegistrationObserver for DesktopRegistration<'_, '_> {
+    fn report_registration(&mut self, event: RegistrationEvent<'_>) {
+        if let RegistrationEvent::Started(step) = event {
+            let _ = self
+                .monitor
+                .post(MonitorEvent::Setup(SetupUpdate::Step(step)));
         }
     }
 }
