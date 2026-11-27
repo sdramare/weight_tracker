@@ -11,6 +11,7 @@ hkdf = "0.12.4"
 hmac = "0.12.1"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdh", "std"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "cookies", "http2", "native-tls", "system-proxy"] }
 sha1 = { version = "0.11.0", default-features = false }
 sha2 = "0.10.9"
 url = "2.5.9"
@@ -20,7 +21,6 @@ windows = { version = "0.62.2", features = [
     "Devices_Bluetooth_GenericAttributeProfile",
     "Foundation_Collections",
     "Storage_Streams",
-    "Win32_Networking_WinHttp",
     "Win32_Security_Cryptography",
     "Win32_System_WinRT",
 ] }

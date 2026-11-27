@@ -493,11 +493,12 @@
 
     <section class="panel" aria-labelledby="cloud-heading">
       <h2 id="cloud-heading">Xiaomi browser session and Europe API</h2>
+      <p>The CLI sends Xiaomi requests through <code>reqwest</code> using Windows’ native TLS. The client allows HTTPS, disables automatic redirects and retries, and limits response bodies to 64 KiB. Browser sign-in requests share an in-memory cookie jar. Signed API requests send only the cookies listed below.</p>
       <h3>Get the smart-home session</h3>
       <ol class="steps">
         <li>GET <code>https://account.xiaomi.com/longPolling/loginUrl</code> with <code>sid=xiaomiio</code>, callback <code>https://sts.api.io.mi.com/sts</code>, and current epoch milliseconds in <code>_dc</code>. Require HTTP 200, strip the optional <code>&amp;&amp;&amp;START&amp;&amp;&amp;</code> prefix, and parse <code>loginUrl</code>, <code>lp</code>, and <code>timeout</code>. Both returned URLs must use HTTPS on port 443 and belong to <code>account.xiaomi.com</code>, <code>account.mi.com</code>, or their subdomains.</li>
         <li>Print the one-time <code>loginUrl</code> for the user’s browser and poll <code>lp</code> until the server lifetime expires, capped at five minutes. HTTP 200 (OK) contains the authorization reply. The app polls again after up to 400 ms on HTTP 202 (Accepted), 204 (No Content), 408 (Request Timeout), 504 (Gateway Timeout), or a client request timeout.</li>
-        <li>Read nonempty <code>ssecurity</code>, decimal <code>userId</code> when present, and <code>location</code>. Require the HTTPS callback host <code>sts.api.io.mi.com</code> and path <code>/sts</code>. GET the callback and require its nonempty <code>serviceToken</code> cookie from a 2xx or 3xx reply. The HTTP client sends requests without following redirects. The CLI holds the session in memory for the command.</li>
+        <li>Read nonempty <code>ssecurity</code>, decimal <code>userId</code> when present, and <code>location</code>. Require the HTTPS callback host <code>sts.api.io.mi.com</code> and path <code>/sts</code>. GET the callback and require its nonempty <code>serviceToken</code> cookie from a 2xx or 3xx reply. The CLI holds the session in memory for the command.</li>
       </ol>
       <h3>Sign and send an API request</h3>
       <ol class="steps">
@@ -521,7 +522,7 @@
         </table>
       </div>
       <p class="note">The read-only check uses <code>/v2/user/get_device_cnt</code> and JSON <code>{"fetch_own":true,"fetch_share":false}</code>. Standalone browser sign-in stops at the callback. The cloud check and registration additionally make the API request.</p>
-      <p class="source"><a href="../crates/scale/src/cloud_sign_in.rs">Browser sign-in</a> · <a href="../crates/scale/src/cloud_sign_in/cloud_api.rs">Signed Europe requests</a></p>
+      <p class="source"><a href="../crates/scale/src/cloud_sign_in.rs">Browser sign-in</a> · <a href="../crates/scale/src/cloud_sign_in/cloud_api.rs">Signed Europe requests</a> · <a href="../crates/scale/src/cloud_sign_in/https.rs">HTTPS transport</a></p>
     </section>
 
     <section class="panel" aria-labelledby="setup-heading">

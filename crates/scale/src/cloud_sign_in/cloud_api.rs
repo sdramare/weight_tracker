@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64ct::{Base64, Encoding};
 use rand_core::{OsRng, RngCore};
+use reqwest::header::{ACCEPT_ENCODING, COOKIE, HeaderMap, HeaderValue};
 use sha1::{Digest as _, Sha1};
 use sha2::{Digest as _, Sha256};
 use url::form_urlencoded;
@@ -40,15 +41,24 @@ pub(super) fn signed_request(
     let url = secure_url(&format!("{EUROPE_API}{path}"))?;
     let request = SignedRequest::new(path, data, &account.security, request_nonce()?)?;
     let token = &account.service_token;
-    let headers = format!(
-        "Content-Type: application/x-www-form-urlencoded\r\n\
-         Accept-Encoding: identity\r\n\
-         x-xiaomi-protocal-flag-cli: PROTOCAL-HTTP2\r\n\
-         MIOT-ENCRYPT-ALGORITHM: ENCRYPT-RC4\r\n\
-         Cookie: userId={user_id}; serviceToken={token}; yetAnotherServiceToken={token}; locale=en_GB\r\n"
+    let mut cookie = HeaderValue::from_str(&format!(
+        "userId={user_id}; serviceToken={token}; yetAnotherServiceToken={token}; locale=en_GB"
+    ))
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid Xiaomi session cookie"))?;
+    cookie.set_sensitive(true);
+    let mut headers = HeaderMap::new();
+    headers.insert(COOKIE, cookie);
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    headers.insert(
+        "x-xiaomi-protocal-flag-cli",
+        HeaderValue::from_static("PROTOCAL-HTTP2"),
+    );
+    headers.insert(
+        "miot-encrypt-algorithm",
+        HeaderValue::from_static("ENCRYPT-RC4"),
     );
     let response = client
-        .post_form(&url, &headers, &request.form, REQUEST_TIMEOUT)
+        .post_form(&url, headers, &request.form, REQUEST_TIMEOUT)
         .map_err(|error| super::request_error("reach Xiaomi's Europe API", error))?;
     response.require_ok("Europe cloud API")?;
     request.result(&response.body)
