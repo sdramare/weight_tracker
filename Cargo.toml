@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/cli", "crates/gui", "crates/scale"]
-default-members = ["crates/cli"]
+default-members = ["crates/gui"]
 resolver = "3"
 
 [workspace.package]
