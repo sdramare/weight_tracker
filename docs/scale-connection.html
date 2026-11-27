@@ -362,7 +362,7 @@
       </figure>
       <h3>Watch and recover</h3>
       <ol class="steps">
-        <li>Start a background worker, try to open SQLite and load rows in timestamp order, and scan continuously. The worker checks for cancellation in 250 ms intervals while waiting for advertisements.</li>
+        <li>Start a background worker, try to open SQLite and load rows in timestamp order, and scan continuously. The worker handles advertisements as they arrive and waits up to one second to check for cancellation when the scan is idle.</li>
         <li>List discovered scales by address. Save eligible broadcast readings as they arrive. On a connectable scale with a saved token, stop the watcher and open a connected weight session.</li>
         <li>Show live and settled values as the worker reports them. On disconnect or inactivity, restart scanning and keep the last settled weight visible. After a scan or connection error, display the error and retry after two seconds.</li>
         <li>On Windows <code>WM_SIZE</code> with <code>SIZE_MINIMIZED</code>, queue a hide request. When it runs, hide only if the window is still minimized and visible. The worker continues listening. Double-click the tray icon to restore the window, or right-click it for <strong>Show weight window</strong> and <strong>Quit</strong>. Closing the window also stops monitoring. If the tray cannot start, Windows minimizes the window normally and the app reports a tray error.</li>

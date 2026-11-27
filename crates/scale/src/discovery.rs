@@ -15,7 +15,7 @@ use windows::Storage::Streams::DataReader;
 
 use super::{BluetoothAddress, Scale, ScaleSetupInfo, SignalStrength, Weight, WeightDecoder};
 
-const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const STOP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const CANDIDATE_LIFETIME: Duration = Duration::from_secs(30);
 
 struct Advertisement {
