@@ -236,35 +236,13 @@ impl Drop for ScaleApp {
     }
 }
 
-fn monitor_credentials() -> (SavedScaleLogins, Option<ScaleBindKey>, Vec<String>) {
-    let logins = SavedScaleLogins::load_default();
-    let mut hints = match &logins {
-        Ok(logins) => logins
-            .warnings()
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-        Err(error) => vec![error.to_string()],
-    };
-    let logins = logins.unwrap_or_default();
-    let bind_key = ScaleBindKey::from_environment();
-    if let Err(error) = &bind_key {
-        hints.push(error.to_string());
-    }
-    let bind_key = bind_key.ok().flatten();
-    if logins.is_empty() && bind_key.is_none() {
-        hints.push("Set up a scale to show live weight.".into());
-    }
-    (logins, bind_key, hints)
-}
-
 fn monitor_scales(
     setup_commands: Receiver<SetupRequest>,
     listening: &AtomicBool,
     sender: &Sender<MonitorEvent>,
     context: &egui::Context,
 ) {
-    ScaleMonitor {
+    let _ = ScaleMonitor {
         setup_commands,
         listening,
         sender,
@@ -276,6 +254,11 @@ fn monitor_scales(
         reconnect_guards: BTreeMap::new(),
     }
     .run();
+}
+
+struct MonitorCredentials {
+    logins: SavedScaleLogins,
+    bind_key: Option<ScaleBindKey>,
 }
 
 struct ScaleMonitor<'a> {
@@ -291,94 +274,114 @@ struct ScaleMonitor<'a> {
 }
 
 impl ScaleMonitor<'_> {
-    fn run(&mut self) {
-        let (mut logins, mut bind_key, hints) = monitor_credentials();
-        if self.post(MonitorEvent::WeightHints(hints)).is_break() {
-            return;
-        }
+    fn run(&mut self) -> ControlFlow<()> {
+        let mut credentials = self.load_credentials()?;
         while self.keep_running() {
-            if let Some(request) = self
-                .pending_setup
-                .take()
-                .or_else(|| self.setup_commands.try_recv().ok())
-            {
-                if self
-                    .post(MonitorEvent::Status(MonitorStatus::SettingUp))
-                    .is_break()
-                {
-                    return;
-                }
-                let result = self.register_scale(request);
-                let hints;
-                (logins, bind_key, hints) = monitor_credentials();
-                if self.post(MonitorEvent::WeightHints(hints)).is_break()
-                    || self
-                        .post(MonitorEvent::Setup(SetupUpdate::Finished(result)))
-                        .is_break()
-                {
-                    return;
-                }
-                continue;
-            }
-            if self
-                .post(MonitorEvent::Status(MonitorStatus::Listening))
-                .is_break()
-            {
-                return;
-            }
-            if let Err(error) = self.monitor_weight(&logins, bind_key.as_ref()) {
-                if self.pending_setup.is_some() {
-                    continue;
-                }
-                if !self.keep_running()
-                    || self
-                        .post(MonitorEvent::Status(MonitorStatus::Retrying(
-                            error.to_string(),
-                        )))
-                        .is_break()
-                {
-                    return;
-                }
-                self.pending_setup = self.setup_commands.recv_timeout(RETRY_DELAY).ok();
+            if let Some(request) = self.next_setup_request() {
+                credentials = self.run_setup(request)?;
+            } else {
+                self.listen_for_weight(&credentials)?;
             }
         }
+        ControlFlow::Continue(())
     }
 
-    fn monitor_weight(
-        &mut self,
-        logins: &SavedScaleLogins,
-        bind_key: Option<&ScaleBindKey>,
-    ) -> io::Result<()> {
+    fn next_setup_request(&mut self) -> Option<SetupRequest> {
+        self.pending_setup
+            .take()
+            .or_else(|| self.setup_commands.try_recv().ok())
+    }
+
+    fn load_credentials(&self) -> ControlFlow<(), MonitorCredentials> {
+        let logins = SavedScaleLogins::load_default();
+        let mut hints = match &logins {
+            Ok(logins) => logins.warnings().iter().map(ToString::to_string).collect(),
+            Err(error) => vec![error.to_string()],
+        };
+        let logins = logins.unwrap_or_default();
+        let bind_key = ScaleBindKey::from_environment();
+        if let Err(error) = &bind_key {
+            hints.push(error.to_string());
+        }
+        let bind_key = bind_key.ok().flatten();
+        if logins.is_empty() && bind_key.is_none() {
+            hints.push("Set up a scale to show live weight.".into());
+        }
+        self.post(MonitorEvent::WeightHints(hints))?;
+        ControlFlow::Continue(MonitorCredentials { logins, bind_key })
+    }
+
+    fn run_setup(&mut self, request: SetupRequest) -> ControlFlow<(), MonitorCredentials> {
+        self.post(MonitorEvent::Status(MonitorStatus::SettingUp))?;
+        let result = self.register_scale(request);
+        let credentials = self.load_credentials()?;
+        self.post(MonitorEvent::Setup(SetupUpdate::Finished(result)))?;
+        ControlFlow::Continue(credentials)
+    }
+
+    fn listen_for_weight(&mut self, credentials: &MonitorCredentials) -> ControlFlow<()> {
+        self.post(MonitorEvent::Status(MonitorStatus::Listening))?;
+        if let Err(error) = self.scan_and_read_weight(credentials) {
+            self.wait_to_retry(error)?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn wait_to_retry(&mut self, error: io::Error) -> ControlFlow<()> {
+        if self.pending_setup.is_some() {
+            return ControlFlow::Continue(());
+        }
+        if !self.keep_running() {
+            return ControlFlow::Break(());
+        }
+        self.post(MonitorEvent::Status(MonitorStatus::Retrying(
+            error.to_string(),
+        )))?;
+        self.pending_setup = self.setup_commands.recv_timeout(RETRY_DELAY).ok();
+        ControlFlow::Continue(())
+    }
+
+    fn scan_and_read_weight(&mut self, credentials: &MonitorCredentials) -> io::Result<()> {
+        let Some(scale) = self.scan_for_weight(credentials)? else {
+            return Ok(());
+        };
+        let Some(token) = credentials.logins.token_for(&scale) else {
+            return Ok(());
+        };
+        if !self.keep_monitoring()
+            || self
+                .post(MonitorEvent::Status(MonitorStatus::Connecting))
+                .is_break()
+        {
+            return Ok(());
+        }
+
+        let address = scale.address();
+        self.reconnect_guards.insert(
+            address,
+            ReconnectGuard {
+                last_offer: Instant::now(),
+            },
+        );
+        let mut session = DesktopWeightSession {
+            monitor: self,
+            address,
+        };
+        watch_connected_weights(&scale, token, &mut session)
+    }
+
+    fn scan_for_weight(&mut self, credentials: &MonitorCredentials) -> io::Result<Option<Scale>> {
         let scan_started_at = Instant::now();
         for guard in self.reconnect_guards.values_mut() {
             guard.scan_resumed(scan_started_at);
         }
         let mut scan = DesktopScaleScan {
             monitor: self,
-            logins,
+            logins: &credentials.logins,
             target: None,
         };
-        watch_scales(bind_key, &mut scan)?;
-        if let Some(scale) = scan.target
-            && let Some(token) = logins.token_for(&scale)
-            && self.keep_monitoring()
-            && self
-                .post(MonitorEvent::Status(MonitorStatus::Connecting))
-                .is_continue()
-        {
-            self.reconnect_guards.insert(
-                scale.address(),
-                ReconnectGuard {
-                    last_offer: Instant::now(),
-                },
-            );
-            let mut session = DesktopWeightSession {
-                monitor: self,
-                address: scale.address(),
-            };
-            watch_connected_weights(&scale, token, &mut session)?;
-        }
-        Ok(())
+        watch_scales(credentials.bind_key.as_ref(), &mut scan)?;
+        Ok(scan.target)
     }
 
     fn register_scale(&mut self, request: SetupRequest) -> io::Result<RegisteredScale> {

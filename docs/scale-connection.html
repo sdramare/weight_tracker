@@ -605,7 +605,8 @@
           </tbody>
         </table>
       </div>
-      <p>The desktop implementations share one <code>ScaleMonitor</code>. Its scan and weight observers yield to a queued registration request. Inside the library, <code>RegistrationAuthorizer</code> prepares the cloud or test proof. <code>BlockPacketSource</code> supplies notifications to the shared packet reader.</p>
+      <p><code>ScaleMonitor::run</code> checks for queued registration before listening for weight. <code>run_setup</code> reloads credentials after registration, while <code>listen_for_weight</code> starts the scan and handles retries. The scan and weight observers yield to queued registration.</p>
+      <p>Inside the library, <code>RegistrationAuthorizer</code> prepares the cloud or test proof. <code>BlockPacketSource</code> supplies notifications to the shared packet reader.</p>
       <p class="source"><a href="../crates/gui/src/desktop.rs">Desktop implementations</a> · <a href="../crates/cli/src/main.rs">Terminal implementations</a> · <a href="../crates/scale/src/setup/certificate_transfer.rs">Registration and packet reader traits</a></p>
     </section>
 
