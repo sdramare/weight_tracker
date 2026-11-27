@@ -10,7 +10,9 @@ use std::{fmt, io};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{GattCharacteristic, GattDeviceService};
 use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice, BluetoothUuidHelper};
 
-use super::{Apartment, Scale, check_service_status, discover_scales, open_scale_device};
+use super::{
+    Apartment, Scale, check_cancellation, check_service_status, discovery, open_scale_device,
+};
 
 pub use certificate_transfer::{SetupCertificateReply, send_setup_test_certificate};
 pub use connected_weight::{
@@ -18,18 +20,29 @@ pub use connected_weight::{
 };
 pub use registration::{
     RegisteredScale, RegistrationEvent, RegistrationStep, register_scale_europe,
+    register_scale_europe_while,
 };
 
 /// Finds the first connectable S200 ms113 that requests Standard Auth registration.
 pub fn find_registration_scale(duration: Duration) -> io::Result<Scale> {
+    find_registration_scale_while(duration, &|| true)
+}
+
+fn find_registration_scale_while(
+    duration: Duration,
+    keep_going: &impl Fn() -> bool,
+) -> io::Result<Scale> {
+    check_cancellation(keep_going)?;
+    let _apartment = Apartment::initialize()?;
     let mut candidate = None;
-    discover_scales(duration, |scale| {
+    discovery::discover(duration, None, keep_going, |scale| {
         if registration_ready(scale) {
             candidate = Some(scale.clone());
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
     })?;
+    check_cancellation(keep_going)?;
     candidate.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,

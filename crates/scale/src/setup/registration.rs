@@ -6,9 +6,9 @@ use std::time::Duration;
 use super::certificate_transfer::{
     RegistrationProof, SetupCertificateReply, finish_credentials, register_with,
 };
-use super::find_registration_scale;
+use super::find_registration_scale_while;
 use crate::cloud_sign_in::EuropeSession;
-use crate::{BluetoothAddress, XiaomiSignInLink};
+use crate::{BluetoothAddress, XiaomiSignInLink, check_cancellation};
 
 /// A stage of cloud-backed S200 registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +67,26 @@ pub fn register_scale_europe(
     scan_time: Duration,
     credentials_directory: &Path,
     present_sign_in_link: impl FnOnce(&XiaomiSignInLink),
+    report: impl FnMut(RegistrationEvent<'_>),
+) -> io::Result<RegisteredScale> {
+    register_scale_europe_while(
+        scan_time,
+        credentials_directory,
+        || true,
+        present_sign_in_link,
+        report,
+    )
+}
+
+/// Registers a scale, checking for cancellation through sign-in and discovery.
+///
+/// Once authorization is requested for the selected scale, finish the registration to
+/// preserve the device's result and corresponding local credentials.
+pub fn register_scale_europe_while(
+    scan_time: Duration,
+    credentials_directory: &Path,
+    keep_going: impl Fn() -> bool,
+    present_sign_in_link: impl FnOnce(&XiaomiSignInLink),
     mut report: impl FnMut(RegistrationEvent<'_>),
 ) -> io::Result<RegisteredScale> {
     use RegistrationEvent::{CredentialsSaved, Passed, Started};
@@ -76,16 +96,19 @@ pub fn register_scale_europe(
     };
 
     let session = run_step(&mut report, BrowserSignIn, || {
-        EuropeSession::sign_in(present_sign_in_link)
+        EuropeSession::sign_in_while(&keep_going, present_sign_in_link)
     })?;
+    check_cancellation(&keep_going)?;
     run_step(&mut report, EuropeApi, || session.verify_device_count())?;
     let scale = run_step(&mut report, ScaleDiscovery, || {
-        find_registration_scale(scan_time)
+        find_registration_scale_while(scan_time, &keep_going)
     })?;
     let address = scale.address();
 
     report(Started(BluetoothKeyExchange));
+    check_cancellation(&keep_going)?;
     let (reply, credentials) = register_with(&scale, |registration| {
+        check_cancellation(&keep_going)?;
         report(Passed(BluetoothKeyExchange));
         let token = registration.login_token_hex();
         let bind_key = registration.bind_key_hex();
@@ -132,4 +155,33 @@ fn run_step<T>(
         action().map_err(|error| io::Error::new(error.kind(), format!("{step}: {error}")))?;
     report(RegistrationEvent::Passed(step));
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::{RegistrationEvent, RegistrationStep, register_scale_europe_while};
+
+    #[test]
+    fn cancels_queued_setup_before_requesting_a_browser_link() {
+        let mut sign_in_presented = false;
+        let mut stages = Vec::new();
+        let result = register_scale_europe_while(
+            Duration::from_secs(30),
+            Path::new("unused"),
+            || false,
+            |_| sign_in_presented = true,
+            |event| {
+                if let RegistrationEvent::Started(step) = event {
+                    stages.push(step);
+                }
+            },
+        );
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::Interrupted));
+        assert!(!sign_in_presented);
+        assert_eq!(stages, [RegistrationStep::BrowserSignIn]);
+    }
 }

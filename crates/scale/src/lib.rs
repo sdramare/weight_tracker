@@ -26,8 +26,8 @@ pub use login_keys::{SavedScaleLogins, ScaleLoginToken, default_registration_dir
 pub use setup::{
     ConnectedWeightEvent, RegisteredScale, RegistrationEvent, RegistrationStep, ScaleSetupInfo,
     SetupCertificateReply, find_registration_scale, listen_for_connected_weight,
-    probe_setup_service, register_scale_europe, send_setup_test_certificate,
-    watch_connected_weights,
+    probe_setup_service, register_scale_europe, register_scale_europe_while,
+    send_setup_test_certificate, watch_connected_weights,
 };
 pub use types::{
     BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight, WeightReading,
@@ -36,6 +36,14 @@ pub use weight::ScaleBindKey;
 use weight::WeightDecoder;
 
 pub const MODEL_NAME: ScaleName<'static> = ScaleName("Xiaomi Smart Scale S200");
+
+fn check_cancellation(keep_going: &impl Fn() -> bool) -> io::Result<()> {
+    if keep_going() {
+        Ok(())
+    } else {
+        Err(io::ErrorKind::Interrupted.into())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scale {
@@ -83,7 +91,7 @@ pub fn discover_scales(
     on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
-    discovery::discover(duration, None, on_scale)
+    discovery::discover(duration, None, || true, on_scale)
 }
 
 /// Discovers scales and reports weights authenticated with the supplied MiBeacon key.
@@ -93,7 +101,7 @@ pub fn discover_scales_with_weight(
     on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
-    discovery::discover(duration, Some(WeightDecoder::new(key)), on_scale)
+    discovery::discover(duration, Some(WeightDecoder::new(key)), || true, on_scale)
 }
 
 /// Watches for scales until stopped by the caller. An optional bind key enables

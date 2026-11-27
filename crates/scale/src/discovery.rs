@@ -36,14 +36,21 @@ struct Candidate {
 }
 
 enum ScanWindow<'a> {
-    Timed(Instant),
+    Timed(Instant, &'a dyn Fn() -> bool),
     Continuous(&'a dyn Fn() -> bool),
 }
 
 impl ScanWindow<'_> {
     fn next_wait(&self) -> Option<Duration> {
         match self {
-            Self::Timed(deadline) => deadline.checked_duration_since(Instant::now()),
+            Self::Timed(deadline, keep_listening) => {
+                if !keep_listening() {
+                    return None;
+                }
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .map(|remaining| remaining.min(STOP_CHECK_INTERVAL))
+            }
             Self::Continuous(keep_listening) => keep_listening().then_some(STOP_CHECK_INTERVAL),
         }
     }
@@ -123,14 +130,17 @@ impl Drop for Watcher {
 pub(super) fn discover(
     duration: Duration,
     decoder: Option<WeightDecoder>,
+    keep_listening: impl Fn() -> bool,
     mut on_scale: impl FnMut(&Scale) -> ControlFlow<()>,
 ) -> io::Result<()> {
     let deadline = Instant::now()
         .checked_add(duration)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid scan duration"))?;
-    run_scan(ScanWindow::Timed(deadline), decoder, |scale, _| {
-        on_scale(scale)
-    })
+    run_scan(
+        ScanWindow::Timed(deadline, &keep_listening),
+        decoder,
+        |scale, _| on_scale(scale),
+    )
 }
 
 pub(super) fn watch(
@@ -402,7 +412,7 @@ mod tests {
 
         let mut updates = Vec::new();
         wait_for_scales(
-            ScanWindow::Timed(Instant::now() + Duration::from_secs(1)),
+            ScanWindow::Timed(Instant::now() + Duration::from_secs(1), &|| true),
             receiver,
             |scale, _| {
                 updates.push((

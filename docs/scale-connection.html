@@ -390,6 +390,14 @@
 
     <section class="panel" aria-labelledby="registration-heading">
       <h2 id="registration-heading">Register an S200 ms113</h2>
+      <h3>Set up from the desktop app</h3>
+      <ol class="steps">
+        <li>Select <strong>Set up scale</strong>. The background worker pauses weight monitoring and starts the same registration flow used by the terminal.</li>
+        <li>Select <strong>Open Xiaomi sign-in</strong> to sign in in your browser. If you need to open the URL manually, use <strong>Copy sign-in link</strong>. Return to the app once you have signed in.</li>
+        <li>When the dialog prompts you, wake only the unregistered S200 you want to set up. The scan lasts up to 30 seconds and uses the first eligible scale. You can cancel while signing in, checking the account, or scanning. The current request finishes before cancellation takes effect.</li>
+        <li>Wait for <strong>Setup complete</strong>, then step on the scale to weigh. The app reloads the local keys and resumes monitoring when the attempt ends.</li>
+      </ol>
+      <h3>Set up from the terminal</h3>
       <div class="quick-start">
         <code class="command">cargo run -- --register-scale</code>
         <p>Sign in once, then wake the unregistered scale when the terminal starts scanning.</p>
@@ -421,7 +429,7 @@
             <text class="node-detail node-inverse" x="727" y="72">Wait for scale confirmation</text>
           </svg>
         </div>
-        <figcaption>The terminal prints <code>Scale setup complete</code> after the scale confirms registration.</figcaption>
+        <figcaption>Both interfaces report completion after the scale confirms registration and the app marks the keys confirmed.</figcaption>
       </figure>
       <h3>Find the scale and derive credentials</h3>
       <ol class="steps">
@@ -456,7 +464,7 @@
           </tbody>
         </table>
       </div>
-      <p class="source"><a href="../crates/scale/src/setup/registration.rs">Registration flow</a> · <a href="../crates/scale/src/setup/registration_crypto.rs">Key derivation and identity encryption</a> · <a href="../crates/scale/src/cloud_sign_in/registration_api.rs">Cloud registration requests</a> · <a href="https://www.rfc-editor.org/rfc/rfc5280.html#section-4.1">X.509 certificate structure</a></p>
+      <p class="source"><a href="../crates/gui/src/scale_setup.rs">Desktop setup dialog</a> · <a href="../crates/scale/src/setup/registration.rs">Registration flow</a> · <a href="../crates/scale/src/setup/registration_crypto.rs">Key derivation and identity encryption</a> · <a href="../crates/scale/src/cloud_sign_in/registration_api.rs">Cloud registration requests</a> · <a href="https://www.rfc-editor.org/rfc/rfc5280.html#section-4.1">X.509 certificate structure</a></p>
     </section>
 
     <section class="panel" aria-labelledby="transport-heading">

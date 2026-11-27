@@ -5,6 +5,8 @@ mod desktop;
 #[cfg(windows)]
 mod history;
 #[cfg(windows)]
+mod scale_setup;
+#[cfg(windows)]
 mod tray;
 #[cfg(windows)]
 mod weight_plot;

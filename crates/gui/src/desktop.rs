@@ -15,6 +15,7 @@ use xiaomi_s200::{
 };
 
 use super::history::{HistoryMonitor, WeightEntry};
+use super::scale_setup::{self, SetupDialog, SetupRequest, SetupUpdate};
 use super::{tray, weight_plot};
 
 const RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -48,6 +49,7 @@ enum MonitorStatus {
     Listening,
     Connecting,
     Connected,
+    SettingUp,
     Retrying(String),
     Stopped(String),
 }
@@ -58,6 +60,8 @@ enum MonitorEvent {
     Weight(BluetoothAddress, WeightReading),
     HistoryLoaded(Vec<WeightEntry>),
     HistoryError(Option<String>),
+    WeightHints(Vec<String>),
+    Setup(SetupUpdate),
 }
 
 struct ScaleRow {
@@ -69,6 +73,8 @@ struct ScaleRow {
 struct ScaleApp {
     scales: BTreeMap<BluetoothAddress, ScaleRow>,
     events: Option<Receiver<MonitorEvent>>,
+    setup_requests: Sender<SetupRequest>,
+    setup_dialog: Option<SetupDialog>,
     listening: Arc<AtomicBool>,
     status: MonitorStatus,
     weight_hints: Vec<String>,
@@ -92,37 +98,14 @@ impl ScaleApp {
         };
 
         let (sender, receiver) = mpsc::channel();
+        let (setup_requests, setup_commands) = mpsc::channel();
         let listening = Arc::new(AtomicBool::new(true));
-        let logins = SavedScaleLogins::load_default();
-        let mut weight_hints = match &logins {
-            Ok(logins) => logins
-                .warnings()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-            Err(error) => vec![error.to_string()],
-        };
-        let logins = logins.unwrap_or_default();
-        let bind_key = ScaleBindKey::from_environment();
-        if let Err(error) = &bind_key {
-            weight_hints.push(error.to_string());
-        }
-        let bind_key = bind_key.ok().flatten();
-        if logins.is_empty() && bind_key.is_none() {
-            weight_hints.push("Register your S200 to show live weight.".into());
-        }
         let worker_listening = Arc::clone(&listening);
         let context = context.clone();
         let worker = thread::Builder::new()
             .name("s200-monitor".into())
             .spawn(move || {
-                monitor_scales(
-                    &logins,
-                    bind_key.as_ref(),
-                    &worker_listening,
-                    &sender,
-                    &context,
-                );
+                monitor_scales(setup_commands, &worker_listening, &sender, &context);
             });
         let (events, status) = match worker {
             Ok(_) => (Some(receiver), MonitorStatus::Listening),
@@ -131,9 +114,11 @@ impl ScaleApp {
         Self {
             scales: BTreeMap::new(),
             events,
+            setup_requests,
+            setup_dialog: None,
             listening,
             status,
-            weight_hints,
+            weight_hints: Vec::new(),
             history: Vec::new(),
             history_error: None,
             group_by: weight_plot::GroupBy::Day,
@@ -167,7 +152,9 @@ impl ScaleApp {
                 Ok(MonitorEvent::Status(status)) => {
                     if matches!(
                         status,
-                        MonitorStatus::Listening | MonitorStatus::Retrying(_)
+                        MonitorStatus::Listening
+                            | MonitorStatus::SettingUp
+                            | MonitorStatus::Retrying(_)
                     ) {
                         for row in self.scales.values_mut() {
                             row.live = None;
@@ -191,11 +178,22 @@ impl ScaleApp {
                     self.history_error = None;
                 }
                 Ok(MonitorEvent::HistoryError(error)) => self.history_error = error,
+                Ok(MonitorEvent::WeightHints(hints)) => self.weight_hints = hints,
+                Ok(MonitorEvent::Setup(update)) => {
+                    if let Some(dialog) = &mut self.setup_dialog {
+                        dialog.receive(update);
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.events = None;
                     self.status =
                         MonitorStatus::Stopped("Bluetooth monitoring ended unexpectedly.".into());
+                    if let Some(dialog @ SetupDialog::Running(_)) = &mut self.setup_dialog {
+                        *dialog = SetupDialog::Finished(Err(io::Error::other(
+                            "The Bluetooth worker stopped during setup.",
+                        )));
+                    }
                     break;
                 }
             }
@@ -216,6 +214,9 @@ impl ScaleApp {
             MonitorStatus::Connected => {
                 ui.label("Connected. Step on and hold still for a reading.");
             }
+            MonitorStatus::SettingUp => {
+                ui.label("Setting up an S200. Weight monitoring is paused.");
+            }
             MonitorStatus::Retrying(message) => {
                 ui.label(RichText::new(format!("Bluetooth retrying. {message}")).color(MUTED));
             }
@@ -232,9 +233,30 @@ impl Drop for ScaleApp {
     }
 }
 
+fn monitor_credentials() -> (SavedScaleLogins, Option<ScaleBindKey>, Vec<String>) {
+    let logins = SavedScaleLogins::load_default();
+    let mut hints = match &logins {
+        Ok(logins) => logins
+            .warnings()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        Err(error) => vec![error.to_string()],
+    };
+    let logins = logins.unwrap_or_default();
+    let bind_key = ScaleBindKey::from_environment();
+    if let Err(error) = &bind_key {
+        hints.push(error.to_string());
+    }
+    let bind_key = bind_key.ok().flatten();
+    if logins.is_empty() && bind_key.is_none() {
+        hints.push("Set up a scale to show live weight.".into());
+    }
+    (logins, bind_key, hints)
+}
+
 fn monitor_scales(
-    logins: &SavedScaleLogins,
-    bind_key: Option<&ScaleBindKey>,
+    setup_commands: Receiver<SetupRequest>,
     listening: &AtomicBool,
     sender: &Sender<MonitorEvent>,
     context: &egui::Context,
@@ -280,26 +302,65 @@ fn monitor_scales(
         report_history(history.borrow_mut().refresh()).is_continue()
     };
     let record_weight = |weight| report_history(history.borrow_mut().record(weight));
-    while keep_listening() && post(MonitorEvent::Status(MonitorStatus::Listening)).is_continue() {
+    let pending_setup = RefCell::new(None);
+    let keep_monitoring = || {
+        let waiting = pending_setup.borrow().is_some();
+        if !waiting && let Ok(request) = setup_commands.try_recv() {
+            pending_setup.replace(Some(request));
+        }
+        pending_setup.borrow().is_none() && keep_listening()
+    };
+    let (mut logins, mut bind_key, hints) = monitor_credentials();
+    if post(MonitorEvent::WeightHints(hints)).is_break() {
+        return;
+    }
+    while keep_listening() {
+        if let Some(request) = pending_setup
+            .take()
+            .or_else(|| setup_commands.try_recv().ok())
+        {
+            if post(MonitorEvent::Status(MonitorStatus::SettingUp)).is_break() {
+                return;
+            }
+            let result = scale_setup::run(request, keep_listening, |event| {
+                let _ = post(MonitorEvent::Setup(event));
+            });
+            let hints;
+            (logins, bind_key, hints) = monitor_credentials();
+            if post(MonitorEvent::WeightHints(hints)).is_break()
+                || post(MonitorEvent::Setup(SetupUpdate::Finished(result))).is_break()
+            {
+                return;
+            }
+            continue;
+        }
+        if post(MonitorEvent::Status(MonitorStatus::Listening)).is_break() {
+            return;
+        }
         let mut target = None;
         let result =
-            watch_scales(bind_key, keep_listening, |scale, broadcast_weight| {
-                post(MonitorEvent::Scale(scale.clone()))?;
-                if let Some(weight) = broadcast_weight {
-                    record_weight(weight)?;
-                }
-                if scale.is_connectable() && logins.token_for(scale).is_some() {
-                    target = Some(scale.clone());
-                    return ControlFlow::Break(());
-                }
-                ControlFlow::Continue(())
-            })
+            watch_scales(
+                bind_key.as_ref(),
+                keep_monitoring,
+                |scale, broadcast_weight| {
+                    post(MonitorEvent::Scale(scale.clone()))?;
+                    if let Some(weight) = broadcast_weight {
+                        record_weight(weight)?;
+                    }
+                    if scale.is_connectable() && logins.token_for(scale).is_some() {
+                        target = Some(scale.clone());
+                        return ControlFlow::Break(());
+                    }
+                    ControlFlow::Continue(())
+                },
+            )
             .and_then(|()| {
                 if let Some(scale) = target
                     && let Some(token) = logins.token_for(&scale)
+                    && keep_monitoring()
                     && post(MonitorEvent::Status(MonitorStatus::Connecting)).is_continue()
                 {
-                    return watch_connected_weights(&scale, token, keep_listening, |event| {
+                    return watch_connected_weights(&scale, token, keep_monitoring, |event| {
                         match event {
                             ConnectedWeightEvent::Ready => {
                                 post(MonitorEvent::Status(MonitorStatus::Connected))
@@ -317,6 +378,9 @@ fn monitor_scales(
                 Ok(())
             });
         if let Err(error) = result {
+            if pending_setup.borrow().is_some() {
+                continue;
+            }
             if !keep_listening()
                 || post(MonitorEvent::Status(MonitorStatus::Retrying(
                     error.to_string(),
@@ -325,7 +389,9 @@ fn monitor_scales(
             {
                 return;
             }
-            thread::sleep(RETRY_DELAY);
+            if let Ok(request) = setup_commands.recv_timeout(RETRY_DELAY) {
+                pending_setup.replace(Some(request));
+            }
         }
     }
 }
@@ -336,7 +402,18 @@ impl eframe::App for ScaleApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(24))
             .show(context, |ui| {
-                ui.heading(RichText::new("Weight monitor").size(28.0));
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new("Weight monitor").size(28.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let button = egui::Button::new("Set up scale");
+                        if ui
+                            .add_enabled(self.setup_dialog.is_none(), button)
+                            .clicked()
+                        {
+                            self.setup_dialog = Some(SetupDialog::start(&self.setup_requests));
+                        }
+                    });
+                });
                 ui.label(RichText::new(MODEL_NAME.to_string()).color(MUTED));
                 ui.add_space(15.0);
                 self.status_line(ui);
@@ -373,6 +450,11 @@ impl eframe::App for ScaleApp {
                         weight_plot::show(ui, &self.history, &mut self.group_by);
                     });
             });
+        if let Some(dialog) = &mut self.setup_dialog
+            && dialog.show(context)
+        {
+            self.setup_dialog = None;
+        }
     }
 }
 

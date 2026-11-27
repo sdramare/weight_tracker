@@ -1,6 +1,6 @@
 # Xiaomi S200 Bluetooth tools
 
-A Rust workspace for the Xiaomi Smart Scale S200 on Windows. The desktop app lists nearby scales and shows live and settled weight from a registered S200 ms113. The CLI also supports GATT inspection and scale setup.
+A Rust workspace for the Xiaomi Smart Scale S200 on Windows. The desktop app registers nearby S200 ms113 scales and shows live and settled weight. The CLI also supports GATT inspection and scale setup.
 
 ## Requirements
 
@@ -54,6 +54,10 @@ Select **By day**, **By week**, or **By month** to group readings by your local 
 
 
 ## Register an S200 ms113
+
+In the desktop app, select **Set up scale**, then **Open Xiaomi sign-in**. Sign in in your browser and return to the app. When it starts scanning, step on the unregistered S200 you want to set up. The app resumes weight monitoring after setup, with the new keys ready to use.
+
+To register from the terminal, run:
 
 ```powershell
 cargo run -- --register-scale

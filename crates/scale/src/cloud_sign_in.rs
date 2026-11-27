@@ -7,7 +7,7 @@ use url::Url;
 use windows::Data::Json::{JsonObject, JsonValue};
 use windows::core::HSTRING;
 
-use super::Apartment;
+use super::{Apartment, check_cancellation};
 
 mod cloud_api;
 mod https;
@@ -61,9 +61,17 @@ pub(crate) struct EuropeSession {
 
 impl EuropeSession {
     pub(crate) fn sign_in(present: impl FnOnce(&XiaomiSignInLink)) -> io::Result<Self> {
+        Self::sign_in_while(&|| true, present)
+    }
+
+    pub(crate) fn sign_in_while(
+        keep_going: &impl Fn() -> bool,
+        present: impl FnOnce(&XiaomiSignInLink),
+    ) -> io::Result<Self> {
+        check_cancellation(keep_going)?;
         let apartment = Apartment::initialize()?;
         let client = https::Session::new()?;
-        let account = sign_in(&client, present)?;
+        let account = sign_in(&client, keep_going, present)?;
         Ok(Self {
             client,
             account,
@@ -94,6 +102,7 @@ struct Authorization {
 
 fn sign_in(
     client: &https::Session,
+    keep_going: &impl Fn() -> bool,
     present: impl FnOnce(&XiaomiSignInLink),
 ) -> io::Result<CloudAccount> {
     let bootstrap = client
@@ -102,9 +111,11 @@ fn sign_in(
     bootstrap.require_ok("sign-in request")?;
     let challenge = Challenge::parse(&bootstrap.body)?;
     let deadline = Instant::now() + challenge.valid_for;
+    check_cancellation(keep_going)?;
     present(&challenge.link);
 
-    let authorization = wait_for_authorization(client, &challenge.poll, deadline)?;
+    let authorization = wait_for_authorization(client, &challenge.poll, deadline, keep_going)?;
+    check_cancellation(keep_going)?;
     let session = client
         .get(&authorization.callback, REQUEST_TIMEOUT)
         .map_err(|error| request_error("complete Xiaomi sign-in", error))?;
@@ -158,8 +169,10 @@ fn wait_for_authorization(
     client: &https::Session,
     poll: &Url,
     deadline: Instant,
+    keep_going: &impl Fn() -> bool,
 ) -> io::Result<Authorization> {
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        check_cancellation(keep_going)?;
         match client.get(poll, remaining.min(REQUEST_TIMEOUT)) {
             Ok(response) if response.status == 200 => {
                 return authorized_callback(&response.body);
@@ -177,6 +190,7 @@ fn wait_for_authorization(
         let remaining = deadline.saturating_duration_since(Instant::now());
         thread::sleep(remaining.min(Duration::from_millis(400)));
     }
+    check_cancellation(keep_going)?;
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         "the Xiaomi sign-in link expired",
