@@ -3,6 +3,9 @@ name = "xiaomi-s200"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-fixtures = []
+
 [target.'cfg(windows)'.dependencies]
 aes = "0.9.4"
 base64ct = { version = "1.8.3", features = ["alloc"] }

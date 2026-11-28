@@ -167,7 +167,8 @@ mod tests {
     use eframe::egui::{self, Event, Shape};
     use xiaomi_s200::RegistrationStep;
 
-    use super::{SetupDialog, SetupUpdate};
+    use super::{SetupAttempt, SetupDialog, SetupUpdate};
+    use xiaomi_s200::test_fixtures::{fixture_registration, scale};
 
     #[test]
     fn progresses_through_sign_in_and_the_scale_scan() {
@@ -229,6 +230,10 @@ mod tests {
         assert!(open.platform_output.commands.iter().any(|command| {
             matches!(command, egui::OutputCommand::OpenUrl(url) if url.url == "https://account.xiaomi.com/test")
         }));
+        let copy = click(&mut dialog, button_position(&sign_in, "Copy sign-in link"));
+        assert!(copy.platform_output.commands.iter().any(|command| {
+            matches!(command, egui::OutputCommand::CopyText(url) if url == "https://account.xiaomi.com/test")
+        }));
 
         dialog.receive(SetupUpdate::Step(RegistrationStep::ScaleDiscovery));
         let _ = render(&mut dialog, Vec::new());
@@ -241,6 +246,10 @@ mod tests {
         ));
         let _ = click(&mut dialog, button_position(&scan, "Cancel"));
         assert!(request.0.load(Ordering::Relaxed));
+        let cancelling = render(&mut dialog, Vec::new());
+        assert!(cancelling.shapes.iter().any(
+            |shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Canceling setup…")
+        ));
         dialog.receive(SetupUpdate::Finished(
             Err(io::ErrorKind::Interrupted.into()),
         ));
@@ -248,5 +257,79 @@ mod tests {
         assert!(cancelled.shapes.iter().any(
             |shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Setup canceled.")
         ));
+    }
+
+    #[test]
+    fn presents_setup_progress_and_success_or_failure_details() {
+        let (sender, requests) = mpsc::channel();
+        let mut dialog = SetupDialog::start(&sender);
+        let _request = requests.recv().unwrap();
+        let status = |dialog: &SetupDialog| match dialog {
+            SetupDialog::Running(attempt) => SetupAttempt::status(attempt),
+            SetupDialog::Finished(_) => "",
+        };
+        assert!(status(&dialog).contains("monitor to pause"));
+        for (step, text) in [
+            (
+                RegistrationStep::BrowserSignIn,
+                "Requesting a Xiaomi sign-in link",
+            ),
+            (
+                RegistrationStep::BluetoothKeyExchange,
+                "Connecting to the scale",
+            ),
+            (
+                RegistrationStep::AllocateDeviceId,
+                "Registering the Bluetooth token",
+            ),
+            (
+                RegistrationStep::RequestCertificate,
+                "signed setup authorization",
+            ),
+            (
+                RegistrationStep::FinishSetup,
+                "waiting for the scale to confirm",
+            ),
+        ] {
+            dialog.receive(SetupUpdate::Step(step));
+            assert!(status(&dialog).contains(text));
+        }
+        for (result, text) in [
+            (
+                Ok(fixture_registration(
+                    scale(7, true, true).address(),
+                    "fixture.keys".into(),
+                )),
+                "Setup complete for 00:00:00:00:00:07.",
+            ),
+            (
+                Err(io::Error::other("fixture network error")),
+                "fixture network error",
+            ),
+        ] {
+            dialog.receive(SetupUpdate::Finished(result));
+            dialog.receive(SetupUpdate::Step(RegistrationStep::ScaleDiscovery));
+            let context = egui::Context::default();
+            let mut rendered = false;
+            for _ in 0..2 {
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(780.0, 640.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        dialog.show(ui.ctx());
+                    },
+                );
+                output.textures_delta.clear();
+                rendered |= output.shapes.iter().any(
+                    |shape| matches!(&shape.shape, Shape::Text(label) if label.galley.text() == text),
+                );
+            }
+            assert!(rendered, "{text}");
+        }
     }
 }

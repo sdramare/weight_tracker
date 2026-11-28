@@ -21,6 +21,18 @@ pub(super) struct Response {
     pub(super) service_token: Option<String>,
 }
 
+pub(super) trait RequestSession {
+    fn get(&self, url: &Url, timeout: Duration) -> io::Result<Response>;
+
+    fn post_form(
+        &self,
+        url: &Url,
+        headers: HeaderMap,
+        body: &str,
+        timeout: Duration,
+    ) -> io::Result<Response>;
+}
+
 impl Session {
     pub(super) fn new() -> io::Result<Self> {
         let client = Client::builder()
@@ -37,8 +49,10 @@ impl Session {
             login_cookies: Jar::default(),
         })
     }
+}
 
-    pub(super) fn get(&self, url: &Url, timeout: Duration) -> io::Result<Response> {
+impl RequestSession for Session {
+    fn get(&self, url: &Url, timeout: Duration) -> io::Result<Response> {
         let mut request = self.client.get(url.clone()).timeout(timeout);
         // Only the sign-in GETs share a cookie jar. Signed POSTs send their own Cookie header.
         if let Some(mut cookie) = self.login_cookies.cookies(url) {
@@ -51,7 +65,7 @@ impl Session {
         Response::read(response)
     }
 
-    pub(super) fn post_form(
+    fn post_form(
         &self,
         url: &Url,
         headers: HeaderMap,
@@ -154,11 +168,104 @@ fn to_io(error: reqwest::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
 
     use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
 
-    use super::{MAX_RESPONSE, read_body, service_token};
+    use super::{
+        Client, Jar, MAX_RESPONSE, Policy, RequestSession, Session, Url, read_body, service_token,
+    };
+
+    #[test]
+    fn shares_cookies_between_gets_and_keeps_them_out_of_signed_posts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for (request, cookie, response) in [
+                ("GET /start ", None, "Set-Cookie: fixture=one; Path=/\r\n"),
+                ("GET /poll ", Some("cookie: fixture=one"), ""),
+                ("POST /signed ", Some("cookie: custom=two"), ""),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                assert!(first.starts_with(request), "{first}");
+                let mut headers = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    headers.push(line.trim_end().to_ascii_lowercase());
+                }
+                assert_eq!(
+                    headers
+                        .iter()
+                        .find(|header| header.starts_with("cookie:"))
+                        .map(String::as_str),
+                    cookie
+                );
+                if request.starts_with("POST") {
+                    assert!(
+                        headers
+                            .iter()
+                            .any(|header| header
+                                == "content-type: application/x-www-form-urlencoded")
+                    );
+                    let mut body = [0; 7];
+                    reader.read_exact(&mut body).unwrap();
+                    assert_eq!(&body, b"key=val");
+                }
+                write!(stream, "HTTP/1.1 200 OK\r\n{response}Content-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+            }
+        });
+        let client = Session {
+            client: Client::builder()
+                .no_proxy()
+                .redirect(Policy::none())
+                .build()
+                .unwrap(),
+            login_cookies: Jar::default(),
+        };
+        let url = |path| Url::parse(&format!("http://{address}/{path}")).unwrap();
+        let timeout = Duration::from_secs(5);
+        for path in ["start", "poll"] {
+            let response = client.get(&url(path), timeout).unwrap();
+            response.require_ok("fixture").unwrap();
+            assert_eq!(response.body, b"{}");
+            assert!(response.service_token.is_none());
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::COOKIE,
+            HeaderValue::from_static("custom=two"),
+        );
+        assert_eq!(
+            client
+                .post_form(&url("signed"), headers, "key=val", timeout)
+                .unwrap()
+                .status,
+            200
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn configured_session_requires_https() {
+        let session = Session::new().unwrap();
+        let url = Url::parse("http://127.0.0.1:1/").unwrap();
+        let error = session.get(&url, Duration::from_secs(1)).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(!error.to_string().contains(url.as_str()));
+    }
 
     #[test]
     fn only_reads_a_valid_nonempty_service_token_cookie() {

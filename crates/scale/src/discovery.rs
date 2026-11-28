@@ -316,22 +316,14 @@ fn read_advertisement(
     let address = BluetoothAddress(address);
 
     let payload = args.Advertisement().ok();
-    let name = payload
+    let AdvertisementPayload {
+        name,
+        is_s200,
+        setup_info,
+        weight,
+    } = payload
         .as_ref()
-        .and_then(|payload| payload.LocalName().ok())
-        .map(|name| name.to_string_lossy())
-        .filter(|name| !name.trim().is_empty());
-    let name_matches = name.as_ref().is_some_and(|name| {
-        let normalized = name.to_ascii_lowercase();
-        normalized.starts_with("xiaomi scale s200")
-            || normalized.starts_with("xiaomi smart scale s200")
-    });
-    let (setup_info, weight) = payload
-        .as_ref()
-        .map(|payload| {
-            let (info, weight) = inspect_service_data(payload, address, decoder);
-            (info.or_else(|| inspect_manufacturer_data(payload)), weight)
-        })
+        .map(|payload| inspect_payload(payload, address, decoder))
         .unwrap_or_default();
     let connectable = match args.AdvertisementType() {
         Ok(
@@ -351,7 +343,7 @@ fn read_advertisement(
     Ok(Some(Advertisement {
         address,
         received_at,
-        is_s200: name_matches || setup_info.is_some(),
+        is_s200,
         name,
         signal_strength: SignalStrength(signal_dbm),
         connectable,
@@ -359,6 +351,39 @@ fn read_advertisement(
         weight,
         setup_info,
     }))
+}
+
+#[derive(Default)]
+struct AdvertisementPayload {
+    name: Option<String>,
+    is_s200: bool,
+    setup_info: Option<ScaleSetupInfo>,
+    weight: Option<Weight>,
+}
+
+fn inspect_payload(
+    payload: &BluetoothLEAdvertisement,
+    address: BluetoothAddress,
+    decoder: Option<&WeightDecoder>,
+) -> AdvertisementPayload {
+    let name = payload
+        .LocalName()
+        .ok()
+        .map(|name| name.to_string_lossy())
+        .filter(|name| !name.trim().is_empty());
+    let name_matches = name.as_ref().is_some_and(|name| {
+        let normalized = name.to_ascii_lowercase();
+        normalized.starts_with("xiaomi scale s200")
+            || normalized.starts_with("xiaomi smart scale s200")
+    });
+    let (info, weight) = inspect_service_data(payload, address, decoder);
+    let setup_info = info.or_else(|| inspect_manufacturer_data(payload));
+    AdvertisementPayload {
+        name,
+        is_s200: name_matches || setup_info.is_some(),
+        setup_info,
+        weight,
+    }
 }
 
 fn inspect_manufacturer_data(payload: &BluetoothLEAdvertisement) -> Option<ScaleSetupInfo> {
@@ -426,11 +451,113 @@ fn inspect_service_data(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Advertisement, BluetoothAddress, BluetoothAddressType, BluetoothLEScanningMode,
-        ControlFlow, Duration, Event, Instant, Scale, ScaleScanObserver, ScanWindow,
-        SignalStrength, Weight, mpsc, wait_for_scales,
+    use windows::Devices::Bluetooth::Advertisement::{
+        BluetoothLEAdvertisementDataSection, BluetoothLEManufacturerData,
     };
+    use windows::Storage::Streams::{DataWriter, IBuffer};
+    use windows::core::HSTRING;
+
+    use super::{
+        Advertisement, BluetoothAddress, BluetoothAddressType, BluetoothLEAdvertisement,
+        BluetoothLEScanningMode, ControlFlow, Duration, Event, Instant, Scale, ScaleScanObserver,
+        ScanWindow, SignalStrength, Weight, WeightDecoder, XIAOMI_COMPANY_ID, inspect_payload,
+        mpsc, wait_for_scales,
+    };
+
+    fn buffer(bytes: &[u8]) -> IBuffer {
+        let writer = DataWriter::new().unwrap();
+        writer.WriteBytes(bytes).unwrap();
+        writer.DetachBuffer().unwrap()
+    }
+
+    #[test]
+    fn inspects_real_winrt_advertisement_sections_without_a_radio() {
+        let _apartment = crate::Apartment::initialize().unwrap();
+        let address = BluetoothAddress(0x1234_5678_9abc);
+        let advertisement = BluetoothLEAdvertisement::new().unwrap();
+        advertisement.SetLocalName(&HSTRING::from("  ")).unwrap();
+        let payload = inspect_payload(&advertisement, address, None);
+        assert!(!payload.is_s200);
+        assert!(payload.name.is_none());
+
+        advertisement
+            .SetLocalName(&HSTRING::from("XIAOMI SMART SCALE S200"))
+            .unwrap();
+        assert!(inspect_payload(&advertisement, address, None).is_s200);
+        advertisement
+            .SetLocalName(&HSTRING::from("Other accessory"))
+            .unwrap();
+        let manufacturer = advertisement.ManufacturerData().unwrap();
+        for (company, data) in [
+            (0xffff, &[0x10, 0x58, 0xcb, 0x4d][..]),
+            (XIAOMI_COMPANY_ID, &[0x10][..]),
+            (XIAOMI_COMPANY_ID, &[0x10, 0x58, 0xcb, 0x4d][..]),
+        ] {
+            manufacturer
+                .Append(&BluetoothLEManufacturerData::Create(company, &buffer(data)).unwrap())
+                .unwrap();
+        }
+        let manufacturer_only = inspect_payload(&advertisement, address, None);
+        assert!(manufacturer_only.is_s200);
+        assert!(manufacturer_only.setup_info.unwrap().is_ms113());
+
+        let sections = advertisement.DataSections().unwrap();
+        for bytes in [
+            &[0x95, 0xfe][..],
+            &[0x01, 0x18, 0x10, 0x59, 0xcb, 0x4d][..],
+            &[0x95, 0xfe, 0x10, 0x59, 0x04, 0x4c][..],
+            crate::weight::tests::WITH_MAC,
+        ] {
+            sections
+                .Append(&BluetoothLEAdvertisementDataSection::Create(0x16, &buffer(bytes)).unwrap())
+                .unwrap();
+        }
+        let key = "000102030405060708090a0b0c0d0e0f".parse().unwrap();
+        let decoded = inspect_payload(&advertisement, address, Some(&WeightDecoder::new(&key)));
+        assert_eq!(decoded.weight, Some(Weight(7255)));
+        assert!(!decoded.setup_info.unwrap().is_ms113());
+        let without_key = inspect_payload(&advertisement, address, None);
+        assert!(without_key.weight.is_none());
+        assert_eq!(without_key.setup_info, decoded.setup_info);
+    }
+
+    #[test]
+    fn reports_why_windows_stopped_an_active_scan() {
+        for (code, message) in [
+            (0, "stopped the scan early"),
+            (1, "radio is unavailable"),
+            (2, "radio is busy"),
+            (5, "disabled by system policy"),
+            (6, "does not support Low Energy"),
+            (9, "does not support Low Energy"),
+            (7, "disabled in this session"),
+            (8, "requires permission"),
+            (55, "Bluetooth error 55"),
+        ] {
+            let (sender, receiver) = mpsc::channel();
+            sender.send(Event::Stopped(code)).unwrap();
+            let error = wait_for_scales(
+                ScanWindow::Continuous,
+                receiver,
+                &mut crate::ConnectableScaleSearch::default(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(message));
+        }
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let error = wait_for_scales(
+            ScanWindow::Continuous,
+            receiver,
+            &mut crate::ConnectableScaleSearch::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("lost the Windows scan event handler")
+        );
+    }
 
     #[test]
     fn only_timed_discovery_requests_scan_responses() {

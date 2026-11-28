@@ -12,12 +12,11 @@ use ccm::aead::{
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic;
 use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothLEDevice};
 
 use super::certificate_transfer::{
-    BlockPacketSource, Channel, FRAGMENTS_RECEIVED, READY, Subscription, TRANSFER_FAILED,
-    block_packets, receive_framed_block, write_packet,
+    BlockPacketSource, Channel, FRAGMENTS_RECEIVED, PacketWriter, READY, Subscription,
+    TRANSFER_FAILED, block_packets, receive_framed_block,
 };
 use super::{setup_characteristic, setup_service};
 use crate::{Apartment, Scale, ScaleLoginToken, Weight, WeightReading, open_scale_device};
@@ -97,67 +96,105 @@ fn read_connected_weights(
 
     let mtu = service.Session()?.MaxPduSize()?;
     let keys = login(&control, &auth, &auth_replies, mtu, token)?;
-    if observer
-        .on_weight_event(ConnectedWeightEvent::Ready)
-        .is_break()
-    {
-        return Ok(());
+    WeightStream {
+        packets: &data_replies,
+        writer: &data,
+        connection: &device,
     }
-    let deadline = measurement_time
-        .map(|duration| {
-            Instant::now().checked_add(duration).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid measurement timeout")
+    .read(keys, measurement_time, observer)
+}
+
+struct WeightStream<'a> {
+    packets: &'a Receiver<Notification>,
+    writer: &'a dyn PacketWriter,
+    connection: &'a dyn ConnectionState,
+}
+
+impl WeightStream<'_> {
+    fn read(
+        &self,
+        keys: LoginKeys,
+        measurement_time: Option<Duration>,
+        observer: &mut dyn WeightSessionObserver,
+    ) -> io::Result<()> {
+        if observer
+            .on_weight_event(ConnectedWeightEvent::Ready)
+            .is_break()
+        {
+            return Ok(());
+        }
+        let deadline = measurement_time
+            .map(|duration| {
+                Instant::now().checked_add(duration).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid measurement timeout")
+                })
             })
-        })
-        .transpose()?;
-    let cipher = WeightCipher::new((&keys.device_key).into());
-    let mut previous = None;
-    loop {
-        let payload = if let Some(deadline) = deadline {
-            receive_framed_block(
-                &data,
-                None,
-                "weight packet",
-                deadline,
-                &mut SettledWeightPackets(&data_replies),
-            )?
-        } else {
-            let idle_deadline = Instant::now() + CONNECTION_IDLE_TIMEOUT;
-            let mut source = LiveWeightPackets {
-                device: &device,
-                receiver: &data_replies,
-                observer,
+            .transpose()?;
+        let cipher = WeightCipher::new((&keys.device_key).into());
+        let mut previous = None;
+        loop {
+            let payload = if let Some(deadline) = deadline {
+                receive_framed_block(
+                    self.writer,
+                    None,
+                    "weight packet",
+                    deadline,
+                    &mut SettledWeightPackets(self.packets),
+                )?
+            } else {
+                let idle_deadline = Instant::now() + CONNECTION_IDLE_TIMEOUT;
+                let mut source = LiveWeightPackets {
+                    connection: self.connection,
+                    receiver: self.packets,
+                    observer,
+                };
+                match receive_framed_block(
+                    self.writer,
+                    None,
+                    "weight packet",
+                    idle_deadline,
+                    &mut source,
+                ) {
+                    Ok(payload) => payload,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotConnected
+                                | io::ErrorKind::TimedOut
+                                | io::ErrorKind::Interrupted
+                                | io::ErrorKind::BrokenPipe
+                        ) =>
+                    {
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
             };
-            match receive_framed_block(&data, None, "weight packet", idle_deadline, &mut source) {
-                Ok(payload) => payload,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotConnected
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                            | io::ErrorKind::BrokenPipe
-                    ) =>
+            if let Some(reading) = decode_weight(&cipher, keys.device_iv, &payload) {
+                let settled = matches!(reading, WeightReading::Settled(_));
+                if (settled || previous != Some(reading))
+                    && observer
+                        .on_weight_event(ConnectedWeightEvent::Reading(reading))
+                        .is_break()
                 {
                     return Ok(());
                 }
-                Err(error) => return Err(error),
+                if settled && deadline.is_some() {
+                    return Ok(());
+                }
+                previous = Some(reading);
             }
-        };
-        if let Some(reading) = decode_weight(&cipher, keys.device_iv, &payload) {
-            let settled = matches!(reading, WeightReading::Settled(_));
-            if (settled || previous != Some(reading))
-                && observer
-                    .on_weight_event(ConnectedWeightEvent::Reading(reading))
-                    .is_break()
-            {
-                return Ok(());
-            }
-            if settled && deadline.is_some() {
-                return Ok(());
-            }
-            previous = Some(reading);
         }
+    }
+}
+
+trait ConnectionState {
+    fn is_connected(&self) -> io::Result<bool>;
+}
+
+impl ConnectionState for BluetoothLEDevice {
+    fn is_connected(&self) -> io::Result<bool> {
+        Ok(self.ConnectionStatus()? != BluetoothConnectionStatus::Disconnected)
     }
 }
 
@@ -170,7 +207,7 @@ impl BlockPacketSource for SettledWeightPackets<'_> {
 }
 
 struct LiveWeightPackets<'a> {
-    device: &'a BluetoothLEDevice,
+    connection: &'a dyn ConnectionState,
     receiver: &'a Receiver<Notification>,
     observer: &'a mut dyn WeightSessionObserver,
 }
@@ -190,7 +227,7 @@ impl BlockPacketSource for LiveWeightPackets<'_> {
                     return Err(io::Error::from(io::ErrorKind::BrokenPipe));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if self.device.ConnectionStatus()? == BluetoothConnectionStatus::Disconnected {
+                    if !self.connection.is_connected()? {
                         return Err(io::Error::from(io::ErrorKind::NotConnected));
                     }
                 }
@@ -201,8 +238,8 @@ impl BlockPacketSource for LiveWeightPackets<'_> {
 }
 
 fn login(
-    control: &GattCharacteristic,
-    auth: &GattCharacteristic,
+    control: &dyn PacketWriter,
+    auth: &dyn PacketWriter,
     replies: &Receiver<Notification>,
     mtu: u16,
     token: &ScaleLoginToken,
@@ -214,7 +251,18 @@ fn login(
     let mut app_random = [0; 16];
     getrandom::fill(&mut app_random)
         .map_err(|_| io::Error::other("could not generate the Bluetooth login challenge"))?;
-    write_packet(control, &LOGIN)?;
+    login_with_challenge(control, auth, &mut replies, mtu, token, app_random)
+}
+
+fn login_with_challenge(
+    control: &dyn PacketWriter,
+    auth: &dyn PacketWriter,
+    replies: &mut LoginReplies<'_>,
+    mtu: u16,
+    token: &ScaleLoginToken,
+    app_random: [u8; 16],
+) -> io::Result<LoginKeys> {
+    control.write(&LOGIN)?;
     replies.send_block(auth, mtu, APP_RANDOM, &app_random, "app challenge")?;
     let scale_random = replies.receive_block(auth, SCALE_RANDOM, "scale challenge")?;
     let scale_random = <[u8; 16]>::try_from(scale_random).map_err(|_| {
@@ -278,7 +326,7 @@ impl LoginReplies<'_> {
 
     fn receive_block(
         &mut self,
-        auth: &GattCharacteristic,
+        auth: &dyn PacketWriter,
         kind: u8,
         stage: &str,
     ) -> io::Result<Vec<u8>> {
@@ -288,17 +336,17 @@ impl LoginReplies<'_> {
 
     fn send_block(
         &mut self,
-        auth: &GattCharacteristic,
+        auth: &dyn PacketWriter,
         mtu: u16,
         kind: u8,
         payload: &[u8],
         stage: &str,
     ) -> io::Result<()> {
         let (announce, packets) = block_packets(mtu, kind, payload)?;
-        write_packet(auth, &announce)?;
+        auth.write(&announce)?;
         self.expect_ack(READY, stage)?;
         for packet in packets {
-            write_packet(auth, &packet)?;
+            auth.write(&packet)?;
         }
         self.expect_ack(FRAGMENTS_RECEIVED, stage)
     }
@@ -454,9 +502,241 @@ fn measured_weight(raw: u32) -> Option<Weight> {
 
 #[cfg(test)]
 mod tests {
-    use ccm::aead::KeyInit;
+    use super::*;
+    use crate::setup::certificate_transfer::tests::PacketLog;
 
-    use super::{LoginKeys, ScaleLoginToken, Weight, WeightCipher, WeightReading, decode_weight};
+    #[test]
+    fn authenticates_with_framed_challenges_and_waits_for_scale_confirmation() {
+        let token = ScaleLoginToken([8; 12]);
+        let app = [1; 16];
+        let scale = [2; 16];
+        let keys = LoginKeys::derive(&token, app, scale).unwrap();
+        let mut mac = login_mac(&keys.device_key).unwrap();
+        mac.update(&scale);
+        mac.update(&app);
+        let proof = mac.finalize().into_bytes();
+        let control = PacketLog::default();
+        let auth = PacketLog::default();
+        let (sender, receiver) = mpsc::channel();
+        for (channel, packet) in [
+            (Channel::Data, vec![0x99]),
+            (Channel::Auth, READY.to_vec()),
+            (Channel::Auth, FRAGMENTS_RECEIVED.to_vec()),
+            (
+                Channel::Auth,
+                [&[0, 0, 2, SCALE_RANDOM][..], &scale].concat(),
+            ),
+            (
+                Channel::Auth,
+                [&[0, 0, 2, SCALE_PROOF][..], &proof].concat(),
+            ),
+            (Channel::Auth, READY.to_vec()),
+            (Channel::Auth, FRAGMENTS_RECEIVED.to_vec()),
+            (Channel::Control, vec![0x21, 0, 0, 0]),
+        ] {
+            sender.send((channel, packet)).unwrap();
+        }
+        drop(sender);
+        let mut replies = LoginReplies {
+            receiver: &receiver,
+            accepted: false,
+        };
+        let negotiated =
+            login_with_challenge(&control, &auth, &mut replies, 247, &token, app).unwrap();
+        assert!(replies.accepted);
+        assert_eq!(negotiated.device_key, keys.device_key);
+        assert_eq!(*control.0.borrow(), [LOGIN]);
+        let writes = auth.0.borrow();
+        assert_eq!(writes[0], [0, 0, 0, APP_RANDOM, 1, 0]);
+        assert_eq!(writes[1][2..], app);
+        assert_eq!(writes[4], [0, 0, 0, APP_PROOF, 1, 0]);
+        assert_eq!(writes[5][2..], keys.app_proof().unwrap());
+    }
+
+    #[test]
+    fn reports_login_rejection_and_missing_notifications() {
+        for (channel, packet, kind, message) in [
+            (
+                Channel::Control,
+                vec![0x23, 0, 0, 0],
+                io::ErrorKind::PermissionDenied,
+                "rejected",
+            ),
+            (
+                Channel::Control,
+                vec![0xe0, 0, 0, 0],
+                io::ErrorKind::PermissionDenied,
+                "unregistered",
+            ),
+            (
+                Channel::Auth,
+                TRANSFER_FAILED.to_vec(),
+                io::ErrorKind::Other,
+                "transfer failed",
+            ),
+            (
+                Channel::Data,
+                vec![],
+                io::ErrorKind::BrokenPipe,
+                "notifications stopped",
+            ),
+        ] {
+            let (sender, receiver) = mpsc::channel();
+            sender.send((channel, packet)).unwrap();
+            drop(sender);
+            let mut replies = LoginReplies {
+                receiver: &receiver,
+                accepted: false,
+            };
+            let error = replies
+                .auth_packet(Instant::now() + LOGIN_TIMEOUT, "proof")
+                .unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert!(error.to_string().contains(message));
+        }
+        let (_sender, receiver) = mpsc::channel();
+        let error = read_notification(&receiver, Instant::now(), "challenge")
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    struct ClosedConnection;
+
+    impl ConnectionState for ClosedConnection {
+        fn is_connected(&self) -> io::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    struct Cancelled;
+
+    impl WeightSessionObserver for Cancelled {
+        fn should_read_weight(&mut self) -> bool {
+            false
+        }
+
+        fn on_weight_event(&mut self, event: ConnectedWeightEvent) -> ControlFlow<()> {
+            panic!("canceled observer received {event:?}");
+        }
+    }
+
+    #[test]
+    fn cancellation_prevents_either_weight_entry_point_from_opening_a_device() {
+        let scale = Scale {
+            address: crate::BluetoothAddress(1),
+            address_type: None,
+            name: None,
+            signal_strength: crate::SignalStrength(-65),
+            connectable: true,
+            weight: None,
+            setup_info: None,
+        };
+        let token = ScaleLoginToken([0; 12]);
+        listen_for_connected_weight(&scale, &token, Duration::from_secs(1), &mut Cancelled)
+            .unwrap();
+        watch_connected_weights(&scale, &token, &mut Cancelled).unwrap();
+    }
+
+    #[test]
+    fn live_notification_wait_stops_on_disconnect_expiry_or_cancellation() {
+        let (_sender, receiver) = mpsc::channel();
+        for (deadline, kind) in [
+            (
+                Instant::now() + Duration::from_millis(500),
+                io::ErrorKind::NotConnected,
+            ),
+            (
+                Instant::now() - Duration::from_millis(1),
+                io::ErrorKind::TimedOut,
+            ),
+        ] {
+            let mut readings = Readings::default();
+            let mut source = LiveWeightPackets {
+                connection: &ClosedConnection,
+                receiver: &receiver,
+                observer: &mut readings,
+            };
+            assert_eq!(
+                source
+                    .next_block_packet(deadline, "weight")
+                    .unwrap_err()
+                    .kind(),
+                kind
+            );
+        }
+        let mut source = LiveWeightPackets {
+            connection: &ClosedConnection,
+            receiver: &receiver,
+            observer: &mut Cancelled,
+        };
+        assert_eq!(
+            source
+                .next_block_packet(Instant::now() + Duration::from_secs(1), "weight")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+
+    #[derive(Default)]
+    struct Readings(Vec<ConnectedWeightEvent>);
+
+    impl WeightSessionObserver for Readings {
+        fn on_weight_event(&mut self, event: ConnectedWeightEvent) -> ControlFlow<()> {
+            self.0.push(event);
+            ControlFlow::Continue(())
+        }
+    }
+
+    #[test]
+    fn reports_live_once_and_stops_timed_reading_after_the_first_settled_frame() {
+        let token = ScaleLoginToken(std::array::from_fn(|index| index as u8));
+        let keys = || {
+            LoginKeys::derive(
+                &token,
+                std::array::from_fn(|index| index as u8),
+                std::array::from_fn(|index| (index + 16) as u8),
+            )
+            .unwrap()
+        };
+        let live = [
+            0x01, 0, 0xc9, 0x71, 0x5a, 0x4e, 0x10, 0x09, 0xda, 0xff, 0xc6, 0x3c,
+        ];
+        let settled = [
+            0x02, 0, 0xde, 0x8f, 0x41, 0x2e, 0xd2, 0x3d, 0x7a, 0x8b, 0x78, 0xc2, 0x85, 0x54, 0xd0,
+            0xcc, 0x57, 0xd5, 0x7c, 0xc2, 0x52, 0xeb, 0xba, 0x70, 0x77, 0xf0, 0xca, 0x63, 0x93,
+            0x86,
+        ];
+        for (time, settled_count) in [(Some(Duration::from_secs(1)), 1), (None, 2)] {
+            let log = PacketLog::default();
+            let (sender, receiver) = mpsc::channel();
+            for payload in [&[0; 2][..], &live, &live, &settled, &settled] {
+                sender
+                    .send((Channel::Data, [&[0, 0, 2, 0][..], payload].concat()))
+                    .unwrap();
+            }
+            drop(sender);
+            let mut readings = Readings::default();
+            WeightStream {
+                packets: &receiver,
+                writer: &log,
+                connection: &ClosedConnection,
+            }
+            .read(keys(), time, &mut readings)
+            .unwrap();
+            let mut expected = vec![
+                ConnectedWeightEvent::Ready,
+                ConnectedWeightEvent::Reading(WeightReading::Live(Weight(9070))),
+            ];
+            expected.extend(std::iter::repeat_n(
+                ConnectedWeightEvent::Reading(WeightReading::Settled(Weight(9070))),
+                settled_count,
+            ));
+            assert_eq!(readings.0, expected);
+            assert_eq!(log.0.borrow().len(), 3 + settled_count);
+        }
+    }
 
     #[test]
     fn verifies_the_scale_and_decodes_authenticated_measurements() {

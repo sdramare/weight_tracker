@@ -24,6 +24,17 @@ pub(super) struct HistoryMonitor {
 }
 
 impl HistoryMonitor {
+    #[cfg(test)]
+    pub(super) fn in_memory() -> io::Result<Self> {
+        let connection = Connection::open_in_memory()
+            .and_then(History::initialize)
+            .map_err(io::Error::other)?;
+        Ok(Self {
+            connection: Some(connection),
+            ..Self::default()
+        })
+    }
+
     pub(super) fn refresh(&mut self) -> io::Result<Option<Vec<WeightEntry>>> {
         let previous = self.data_version;
         let connection = self.connection()?;
@@ -208,5 +219,12 @@ mod tests {
         drop(monitor);
         drop(writer);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn resolves_the_default_database_without_creating_it() {
+        let path = super::default_path().unwrap();
+        assert!(path.is_absolute());
+        assert!(path.ends_with("data/weights.sqlite3"));
     }
 }

@@ -10,6 +10,34 @@ mod setup;
 mod types;
 mod weight;
 
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub mod test_fixtures {
+    use super::*;
+
+    pub fn scale(address: u64, connectable: bool, registered: bool) -> Scale {
+        let control = if registered { 0x59 } else { 0x58 };
+        Scale {
+            address: BluetoothAddress(address),
+            address_type: None,
+            name: None,
+            signal_strength: SignalStrength(-45),
+            connectable,
+            weight: None,
+            setup_info: ScaleSetupInfo::from_mibeacon(&[0x95, 0xfe, 0x10, control, 0xcb, 0x4d]),
+        }
+    }
+
+    pub fn with_weight(mut scale: Scale, weight: Weight) -> Scale {
+        scale.weight = Some(weight);
+        scale
+    }
+
+    pub use crate::cloud_sign_in::fixture_sign_in_link;
+    pub use crate::login_keys::fixture_logins;
+    pub use crate::setup::{fixture_profile, fixture_registration};
+}
+
 use std::io;
 use std::marker::PhantomData;
 use std::ops::ControlFlow;
@@ -118,21 +146,26 @@ pub fn watch_scales(
 pub fn find_connectable_scale(duration: Duration) -> io::Result<Scale> {
     let mut scan = ConnectableScaleSearch::default();
     discover_scales(duration, &mut scan)?;
-
-    scan.target.ok_or_else(|| {
-        let message = if scan.detected {
-            "the S200 was detected, but did not offer a connection. Close Xiaomi Home and wake the scale again"
-        } else {
-            "no Xiaomi Smart Scale S200 was detected. Keep it near the PC and wake it during the scan"
-        };
-        io::Error::new(io::ErrorKind::NotFound, message)
-    })
+    scan.finish()
 }
 
 #[derive(Default)]
 struct ConnectableScaleSearch {
     target: Option<Scale>,
     detected: bool,
+}
+
+impl ConnectableScaleSearch {
+    fn finish(self) -> io::Result<Scale> {
+        self.target.ok_or_else(|| {
+            let message = if self.detected {
+                "the S200 was detected, but did not offer a connection. Close Xiaomi Home and wake the scale again"
+            } else {
+                "no Xiaomi Smart Scale S200 was detected. Keep it near the PC and wake it during the scan"
+            };
+            io::Error::new(io::ErrorKind::NotFound, message)
+        })
+    }
 }
 
 impl ScaleScanObserver for ConnectableScaleSearch {
@@ -213,5 +246,62 @@ impl Drop for Apartment {
     fn drop(&mut self) {
         // SAFETY: This balances one successful RoInitialize on the same thread.
         unsafe { RoUninitialize() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_gatt_status_and_rejects_unavailable_access() {
+        assert!(check_service_status(GattCommunicationStatus::Success).is_ok());
+        for (status, message) in [
+            (GattCommunicationStatus::Unreachable, "stopped responding"),
+            (GattCommunicationStatus::AccessDenied, "denied access"),
+            (
+                GattCommunicationStatus::ProtocolError,
+                "GATT service discovery returned",
+            ),
+        ] {
+            assert!(
+                check_service_status(status)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        }
+    }
+
+    #[test]
+    fn selects_a_connectable_broadcast_and_distinguishes_no_scan_results() {
+        let mut scan = ConnectableScaleSearch::default();
+        assert!(
+            ConnectableScaleSearch::default()
+                .finish()
+                .unwrap_err()
+                .to_string()
+                .contains("no Xiaomi")
+        );
+        let mut scale = Scale {
+            address: BluetoothAddress(5),
+            address_type: None,
+            name: Some("fixture".into()),
+            signal_strength: SignalStrength(-65),
+            connectable: false,
+            weight: None,
+            setup_info: None,
+        };
+        assert!(scan.scale_discovered(&scale, None).is_continue());
+        assert!(
+            scan.finish()
+                .unwrap_err()
+                .to_string()
+                .contains("did not offer")
+        );
+        let mut scan = ConnectableScaleSearch::default();
+        scale.connectable = true;
+        assert!(scan.scale_discovered(&scale, None).is_break());
+        assert_eq!(scan.finish().unwrap(), scale);
     }
 }

@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText};
 use xiaomi_s200::{
     BluetoothAddress, ConnectedWeightEvent, MODEL_NAME, RegisteredScale, RegistrationEvent,
-    RegistrationObserver, SavedScaleLogins, Scale, ScaleBindKey, ScaleScanObserver,
-    ScaleSetupInteraction, Weight, WeightReading, WeightSessionObserver, XiaomiSignInLink,
-    default_registration_directory, register_scale_europe, watch_connected_weights, watch_scales,
+    RegistrationObserver, SavedScaleLogins, Scale, ScaleBindKey, ScaleLoginToken,
+    ScaleScanObserver, ScaleSetupInteraction, Weight, WeightReading, WeightSessionObserver,
+    XiaomiSignInLink, default_registration_directory, register_scale_europe,
+    watch_connected_weights, watch_scales,
 };
 
 use super::history::{HistoryMonitor, WeightEntry};
@@ -247,6 +248,7 @@ fn monitor_scales(
         listening,
         sender,
         context,
+        backend: &WindowsScaleBackend,
         history: HistoryMonitor::default(),
         next_history_refresh: Instant::now(),
         history_error: None,
@@ -261,11 +263,66 @@ struct MonitorCredentials {
     bind_key: Option<ScaleBindKey>,
 }
 
+trait ScaleBackend {
+    fn saved_logins(&self) -> io::Result<SavedScaleLogins>;
+    fn bind_key(&self) -> io::Result<Option<ScaleBindKey>>;
+    fn scan(
+        &self,
+        key: Option<&ScaleBindKey>,
+        observer: &mut dyn ScaleScanObserver,
+    ) -> io::Result<()>;
+    fn read_weight(
+        &self,
+        scale: &Scale,
+        token: &ScaleLoginToken,
+        observer: &mut dyn WeightSessionObserver,
+    ) -> io::Result<()>;
+    fn register(&self, observer: &mut dyn RegistrationObserver) -> io::Result<RegisteredScale>;
+}
+
+struct WindowsScaleBackend;
+
+impl ScaleBackend for WindowsScaleBackend {
+    fn saved_logins(&self) -> io::Result<SavedScaleLogins> {
+        SavedScaleLogins::load_default()
+    }
+
+    fn bind_key(&self) -> io::Result<Option<ScaleBindKey>> {
+        ScaleBindKey::from_environment()
+    }
+
+    fn scan(
+        &self,
+        key: Option<&ScaleBindKey>,
+        observer: &mut dyn ScaleScanObserver,
+    ) -> io::Result<()> {
+        watch_scales(key, observer)
+    }
+
+    fn read_weight(
+        &self,
+        scale: &Scale,
+        token: &ScaleLoginToken,
+        observer: &mut dyn WeightSessionObserver,
+    ) -> io::Result<()> {
+        watch_connected_weights(scale, token, observer)
+    }
+
+    fn register(&self, observer: &mut dyn RegistrationObserver) -> io::Result<RegisteredScale> {
+        register_scale_europe(
+            SETUP_SCAN_TIME,
+            &default_registration_directory()?,
+            observer,
+        )
+    }
+}
+
 struct ScaleMonitor<'a> {
     setup_commands: Receiver<SetupRequest>,
     listening: &'a AtomicBool,
     sender: &'a Sender<MonitorEvent>,
     context: &'a egui::Context,
+    backend: &'a dyn ScaleBackend,
     history: HistoryMonitor,
     next_history_refresh: Instant,
     history_error: Option<String>,
@@ -293,13 +350,13 @@ impl ScaleMonitor<'_> {
     }
 
     fn load_credentials(&self) -> ControlFlow<(), MonitorCredentials> {
-        let logins = SavedScaleLogins::load_default();
+        let logins = self.backend.saved_logins();
         let mut hints = match &logins {
             Ok(logins) => logins.warnings().iter().map(ToString::to_string).collect(),
             Err(error) => vec![error.to_string()],
         };
         let logins = logins.unwrap_or_default();
-        let bind_key = ScaleBindKey::from_environment();
+        let bind_key = self.backend.bind_key();
         if let Err(error) = &bind_key {
             hints.push(error.to_string());
         }
@@ -363,11 +420,12 @@ impl ScaleMonitor<'_> {
                 last_offer: Instant::now(),
             },
         );
+        let backend = self.backend;
         let mut session = DesktopWeightSession {
             monitor: self,
             address,
         };
-        watch_connected_weights(&scale, token, &mut session)
+        backend.read_weight(&scale, token, &mut session)
     }
 
     fn scan_for_weight(&mut self, credentials: &MonitorCredentials) -> io::Result<Option<Scale>> {
@@ -375,22 +433,23 @@ impl ScaleMonitor<'_> {
         for guard in self.reconnect_guards.values_mut() {
             guard.scan_resumed(scan_started_at);
         }
+        let backend = self.backend;
         let mut scan = DesktopScaleScan {
             monitor: self,
             logins: &credentials.logins,
             target: None,
         };
-        watch_scales(credentials.bind_key.as_ref(), &mut scan)?;
+        backend.scan(credentials.bind_key.as_ref(), &mut scan)?;
         Ok(scan.target)
     }
 
     fn register_scale(&mut self, request: SetupRequest) -> io::Result<RegisteredScale> {
-        let directory = default_registration_directory()?;
+        let backend = self.backend;
         let mut setup = DesktopRegistration {
             monitor: self,
             request,
         };
-        register_scale_europe(SETUP_SCAN_TIME, &directory, &mut setup)
+        backend.register(&mut setup)
     }
 
     fn post(&self, event: MonitorEvent) -> ControlFlow<()> {
@@ -567,6 +626,12 @@ impl eframe::App for ScaleApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render(ui);
+    }
+}
+
+impl ScaleApp {
+    fn render(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(24))
             .show(ui, |ui| {
@@ -671,10 +736,396 @@ fn scale_row(ui: &mut egui::Ui, row: &ScaleRow) {
 }
 
 #[cfg(test)]
-mod reconnect_tests {
-    use std::time::{Duration, Instant};
+mod tests {
+    use std::cell::Cell;
 
-    use super::{RECONNECT_QUIET_PERIOD, ReconnectGuard};
+    use xiaomi_s200::RegistrationStep;
+    use xiaomi_s200::test_fixtures::{
+        fixture_logins, fixture_registration, fixture_sign_in_link, scale, with_weight,
+    };
+
+    use super::*;
+
+    fn headless_app(status: MonitorStatus) -> (ScaleApp, Sender<MonitorEvent>) {
+        let (sender, events) = mpsc::channel();
+        let (setup_requests, _) = mpsc::channel();
+        (
+            ScaleApp {
+                scales: BTreeMap::new(),
+                events: Some(events),
+                setup_requests,
+                setup_dialog: None,
+                listening: Arc::new(AtomicBool::new(true)),
+                status,
+                weight_hints: Vec::new(),
+                history: Vec::new(),
+                history_error: None,
+                group_by: weight_plot::GroupBy::Day,
+                _tray: None,
+                tray_error: Some("icon unavailable".into()),
+            },
+            sender,
+        )
+    }
+
+    fn painted_labels(app: &mut ScaleApp) -> Vec<String> {
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(780.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn displays_live_weight_then_preserves_settled_weight_across_updates() {
+        let (mut app, sender) = headless_app(MonitorStatus::Listening);
+        let scale = scale(7, true, true);
+        let address = scale.address();
+        let weight = Weight::from_hundredths_of_kg(7525);
+        let live = Weight::from_hundredths_of_kg(7600);
+        sender
+            .send(MonitorEvent::Scale(with_weight(scale.clone(), weight)))
+            .unwrap();
+        sender
+            .send(MonitorEvent::Weight(address, WeightReading::Live(live)))
+            .unwrap();
+        sender
+            .send(MonitorEvent::Status(MonitorStatus::Connected))
+            .unwrap();
+        sender
+            .send(MonitorEvent::WeightHints(vec!["fixture hint".into()]))
+            .unwrap();
+        sender
+            .send(MonitorEvent::HistoryError(Some("database busy".into())))
+            .unwrap();
+        app.receive_events();
+        let labels = painted_labels(&mut app);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("Live weight") && label.contains("76.00"))
+        );
+        assert!(labels.iter().any(|label| label.contains("database busy")));
+        assert!(labels.iter().any(|label| label.contains("fixture hint")));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("System tray unavailable"))
+        );
+
+        let updated = Weight::from_hundredths_of_kg(7575);
+        sender
+            .send(MonitorEvent::Weight(
+                address,
+                WeightReading::Settled(updated),
+            ))
+            .unwrap();
+        sender.send(MonitorEvent::Scale(scale)).unwrap();
+        sender
+            .send(MonitorEvent::HistoryLoaded(vec![WeightEntry {
+                measured_at_ms: 1_790_000_000_000,
+                weight: updated,
+            }]))
+            .unwrap();
+        sender
+            .send(MonitorEvent::Status(MonitorStatus::Retrying(
+                "radio busy".into(),
+            )))
+            .unwrap();
+        app.receive_events();
+        assert_eq!(app.scales[&address].settled, Some(updated));
+        assert!(app.scales[&address].live.is_none());
+        assert_eq!(app.history.len(), 1);
+        assert!(app.history_error.is_none());
+        let labels = painted_labels(&mut app);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("Last settled weight") && label.contains("75.75"))
+        );
+        assert!(labels.iter().any(|label| label.contains("radio busy")));
+    }
+
+    #[test]
+    fn worker_disconnect_finishes_the_pending_dialog_and_app_drop_stops_listening() {
+        let (mut app, sender) = headless_app(MonitorStatus::SettingUp);
+        let (requests, receiver) = mpsc::channel();
+        app.setup_dialog = Some(SetupDialog::start(&requests));
+        assert!(!receiver.try_recv().unwrap().is_cancelled());
+        sender
+            .send(MonitorEvent::Setup(SetupUpdate::Step(
+                RegistrationStep::EuropeApi,
+            )))
+            .unwrap();
+        app.receive_events();
+        let labels = painted_labels(&mut app);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("Weight monitoring is paused"))
+        );
+        drop(sender);
+        app.receive_events();
+        assert!(app.events.is_none());
+        assert!(matches!(app.status, MonitorStatus::Stopped(_)));
+        assert!(
+            matches!(&app.setup_dialog, Some(SetupDialog::Finished(Err(error))) if error.to_string().contains("worker stopped during setup"))
+        );
+        let listening = Arc::clone(&app.listening);
+        drop(app);
+        assert!(!listening.load(Ordering::Relaxed));
+    }
+
+    struct FixtureBackend<'a> {
+        listening: &'a AtomicBool,
+        scale: Scale,
+        scans: Cell<u32>,
+        did_setup: Cell<bool>,
+    }
+
+    impl ScaleBackend for FixtureBackend<'_> {
+        fn saved_logins(&self) -> io::Result<SavedScaleLogins> {
+            Ok(if self.did_setup.get() {
+                fixture_logins(&self.scale)
+            } else {
+                SavedScaleLogins::default()
+            })
+        }
+
+        fn bind_key(&self) -> io::Result<Option<ScaleBindKey>> {
+            Err(io::Error::other("invalid fixture bind key"))
+        }
+
+        fn scan(
+            &self,
+            _: Option<&ScaleBindKey>,
+            observer: &mut dyn ScaleScanObserver,
+        ) -> io::Result<()> {
+            if self.scans.replace(self.scans.get() + 1) == 0 {
+                assert!(observer.should_scan());
+                assert!(observer.scale_discovered(&self.scale, None).is_continue());
+                assert!(
+                    observer
+                        .connection_offered(&self.scale, Instant::now())
+                        .is_break()
+                );
+            } else {
+                assert!(
+                    observer
+                        .connection_offered(&self.scale, Instant::now())
+                        .is_continue()
+                );
+                self.listening.store(false, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        fn read_weight(
+            &self,
+            scale: &Scale,
+            _: &ScaleLoginToken,
+            observer: &mut dyn WeightSessionObserver,
+        ) -> io::Result<()> {
+            assert_eq!(scale, &self.scale);
+            assert!(observer.should_read_weight());
+            let weight = Weight::from_hundredths_of_kg(7500);
+            for event in [
+                ConnectedWeightEvent::Ready,
+                ConnectedWeightEvent::Reading(WeightReading::Live(weight)),
+                ConnectedWeightEvent::Reading(WeightReading::Settled(weight)),
+            ] {
+                assert!(observer.on_weight_event(event).is_continue());
+            }
+            Ok(())
+        }
+
+        fn register(&self, observer: &mut dyn RegistrationObserver) -> io::Result<RegisteredScale> {
+            assert!(!observer.setup_cancelled());
+            observer.present_xiaomi_sign_in(&fixture_sign_in_link().unwrap());
+            observer
+                .report_registration(RegistrationEvent::Started(RegistrationStep::ScaleDiscovery));
+            observer
+                .report_registration(RegistrationEvent::Passed(RegistrationStep::ScaleDiscovery));
+            self.did_setup.set(true);
+            Ok(fixture_registration(
+                self.scale.address(),
+                "fixture.confirmed.keys".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn queued_setup_reloads_credentials_before_listening_and_records_settled_weight() {
+        let (setup, commands) = mpsc::channel();
+        let (sender, events) = mpsc::channel();
+        let listening = AtomicBool::new(true);
+        let context = egui::Context::default();
+        let backend = FixtureBackend {
+            listening: &listening,
+            scale: scale(9, true, true),
+            scans: Cell::new(0),
+            did_setup: Cell::new(false),
+        };
+        let mut monitor = ScaleMonitor {
+            setup_commands: commands,
+            listening: &listening,
+            sender: &sender,
+            context: &context,
+            backend: &backend,
+            history: HistoryMonitor::in_memory().unwrap(),
+            next_history_refresh: Instant::now(),
+            history_error: None,
+            pending_setup: None,
+            reconnect_guards: BTreeMap::new(),
+        };
+        let _dialog = SetupDialog::start(&setup);
+        assert!(monitor.run().is_continue());
+        let events: Vec<_> = events.try_iter().collect();
+        assert!(
+            matches!(&events[0], MonitorEvent::WeightHints(hints) if hints.iter().any(|hint| hint.contains("Set up a scale")))
+        );
+        let setup_idx = events
+            .iter()
+            .position(|event| matches!(event, MonitorEvent::Setup(SetupUpdate::Finished(Ok(_)))))
+            .unwrap();
+        let reading_idx = events
+            .iter()
+            .position(|event| matches!(event, MonitorEvent::Weight(_, WeightReading::Settled(_))))
+            .unwrap();
+        assert!(setup_idx < reading_idx);
+        assert!(events[..setup_idx].iter().any(|event| matches!(event, MonitorEvent::Setup(SetupUpdate::SignInLink(link)) if link.contains("ticket=fixture"))));
+        assert!(
+            matches!(&events[setup_idx - 1], MonitorEvent::WeightHints(hints) if hints == &["invalid fixture bind key"])
+        );
+        assert!(
+            matches!(&events[reading_idx + 1], MonitorEvent::HistoryLoaded(entries) if entries.len() == 1)
+        );
+        assert_eq!(backend.scans.get(), 2);
+    }
+
+    #[test]
+    fn pending_setup_interrupts_the_retry_delay_and_database_errors_are_reported_once() {
+        let (setup, commands) = mpsc::channel();
+        let (sender, events) = mpsc::channel();
+        let listening = AtomicBool::new(true);
+        let context = egui::Context::default();
+        let backend = FixtureBackend {
+            listening: &listening,
+            scale: scale(2, true, true),
+            scans: Cell::new(0),
+            did_setup: Cell::new(false),
+        };
+        let mut monitor = ScaleMonitor {
+            setup_commands: commands,
+            listening: &listening,
+            sender: &sender,
+            context: &context,
+            backend: &backend,
+            history: HistoryMonitor::in_memory().unwrap(),
+            next_history_refresh: Instant::now() + HISTORY_REFRESH_INTERVAL,
+            history_error: None,
+            pending_setup: None,
+            reconnect_guards: BTreeMap::new(),
+        };
+
+        let _dialog = SetupDialog::start(&setup);
+        assert!(
+            monitor
+                .wait_to_retry(io::Error::other("radio busy"))
+                .is_continue()
+        );
+        assert!(
+            matches!(events.try_recv().unwrap(), MonitorEvent::Status(MonitorStatus::Retrying(error)) if error == "radio busy")
+        );
+        assert!(
+            monitor
+                .wait_to_retry(io::Error::other("repeat failure"))
+                .is_continue()
+        );
+        assert!(events.try_recv().is_err());
+        assert!(!monitor.keep_monitoring());
+        assert!(monitor.next_setup_request().is_some());
+
+        for _ in 0..2 {
+            assert!(
+                monitor
+                    .report_history(Err(io::Error::other("SQLite busy")))
+                    .is_continue()
+            );
+        }
+        assert!(
+            matches!(events.try_recv().unwrap(), MonitorEvent::HistoryError(Some(error)) if error == "SQLite busy")
+        );
+        assert!(events.try_recv().is_err());
+        assert!(monitor.report_history(Ok(None)).is_continue());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            MonitorEvent::HistoryError(None)
+        ));
+        assert!(monitor.report_history(Ok(None)).is_continue());
+        assert!(events.try_recv().is_err());
+        drop(events);
+        assert!(
+            monitor
+                .post(MonitorEvent::Status(MonitorStatus::Listening))
+                .is_break()
+        );
+        listening.store(false, Ordering::Relaxed);
+        assert!(
+            monitor
+                .wait_to_retry(io::Error::other("shutdown"))
+                .is_break()
+        );
+    }
+
+    #[test]
+    fn renders_monitor_status_and_a_broadcast_only_scale() {
+        let (mut app, sender) = headless_app(MonitorStatus::Listening);
+        sender
+            .send(MonitorEvent::Scale(scale(2, false, true)))
+            .unwrap();
+        app.receive_events();
+        let labels = painted_labels(&mut app);
+        assert!(labels.iter().any(|label| label == "Broadcasting"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("Listening for the scale"))
+        );
+        sender
+            .send(MonitorEvent::Status(MonitorStatus::Connecting))
+            .unwrap();
+        app.receive_events();
+        let labels = painted_labels(&mut app);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("Connecting to the scale"))
+        );
+        drop(sender);
+        app.receive_events();
+        let labels = painted_labels(&mut app);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("monitoring ended unexpectedly"))
+        );
+    }
 
     #[test]
     fn repeated_offers_do_not_reconnect_until_the_scale_goes_quiet() {

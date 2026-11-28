@@ -1,6 +1,6 @@
-use std::process::ExitCode;
 #[cfg(windows)]
-use std::{collections::BTreeMap, ops::ControlFlow};
+use std::{collections::BTreeMap, ops::ControlFlow, time::Duration};
+use std::{ffi::OsString, process::ExitCode};
 
 #[cfg(windows)]
 use xiaomi_s200::{
@@ -9,6 +9,13 @@ use xiaomi_s200::{
     ScaleSetupInteraction, SetupCheck, SetupCheckObserver, SetupCheckStatus, Weight, WeightReading,
     WeightSessionObserver, XiaomiSignInLink,
 };
+
+#[cfg(windows)]
+mod backend;
+#[cfg(windows)]
+use backend::{AccountCheck, ScaleOperations, ScaleSelection, WindowsScale};
+#[cfg(all(windows, test))]
+mod windows_tests;
 
 const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --setup-profile | --setup-test-cert | --check-setup] [--seconds <1-60>]\n\
     blt_unlock --register-scale [--seconds <1-60>]\n\
@@ -25,6 +32,7 @@ const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --se
     The discovery timeout defaults to 30 seconds.";
 const DEFAULT_SECONDS: u64 = 30;
 
+#[derive(Debug, PartialEq, Eq)]
 enum Command {
     Services,
     Weight,
@@ -38,17 +46,29 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1).peekable();
-    if args.len() == 1
-        && matches!(
-            args.peek().and_then(|arg| arg.to_str()),
-            Some("-h" | "--help")
-        )
-    {
-        println!("{USAGE}");
-        return ExitCode::SUCCESS;
+    match parse_args(std::env::args_os().skip(1)) {
+        Ok(Some((seconds, command))) => run(seconds, command),
+        Ok(None) => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        Err(()) => usage_error(),
     }
+}
 
+fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<(u64, Command)>, ()> {
+    let mut args = args.into_iter().peekable();
+    if matches!(
+        args.peek().and_then(|arg| arg.to_str()),
+        Some("-h" | "--help")
+    ) {
+        args.next();
+        return if args.next().is_none() {
+            Ok(None)
+        } else {
+            Err(())
+        };
+    }
     let mut seconds = None;
     let mut command = None;
     while let Some(arg) = args.next() {
@@ -59,7 +79,7 @@ fn main() -> ExitCode {
                     .and_then(|value| value.to_str()?.parse::<u64>().ok())
                     .filter(|value| (1..=60).contains(value));
                 if seconds.is_none() {
-                    return usage_error();
+                    return Err(());
                 }
             }
             Some("--scale") if command.is_none() => command = Some(Command::Services),
@@ -75,7 +95,7 @@ fn main() -> ExitCode {
             Some("--xiaomi-check-cloud") if command.is_none() => {
                 command = Some(Command::XiaomiCloudCheck)
             }
-            _ => return usage_error(),
+            _ => return Err(()),
         }
     }
 
@@ -84,12 +104,12 @@ fn main() -> ExitCode {
         Some(Command::XiaomiSignIn | Command::XiaomiCloudCheck)
     ) && seconds.is_some()
     {
-        return usage_error();
+        return Err(());
     }
-    run(
+    Ok(Some((
         seconds.unwrap_or(DEFAULT_SECONDS),
         command.unwrap_or(Command::Services),
-    )
+    )))
 }
 
 fn usage_error() -> ExitCode {
@@ -99,33 +119,42 @@ fn usage_error() -> ExitCode {
 
 #[cfg(windows)]
 fn run(seconds: u64, command: Command) -> ExitCode {
-    use std::time::Duration;
+    run_with(seconds, command, &WindowsScale)
+}
 
+#[cfg(windows)]
+fn run_with(seconds: u64, command: Command, backend: &impl ScaleOperations) -> ExitCode {
     let duration = Duration::from_secs(seconds);
     let (result, error_label) = match command {
         Command::Services => {
             println!(
                 "Looking for a Xiaomi Smart Scale S200 for up to {seconds} seconds. Step on the scale to wake it."
             );
-            (show_connection(duration), "Scale connection failed")
+            (
+                show_connection(duration, backend),
+                "Scale connection failed",
+            )
         }
-        Command::Weight => (show_weight(duration), "Scale weight unavailable"),
+        Command::Weight => (show_weight(duration, backend), "Scale weight unavailable"),
         Command::SetupInfo => (
-            show_setup_info(duration),
+            show_setup_info(duration, backend),
             "Scale setup information unavailable",
         ),
         Command::SetupProfile => (
-            show_setup_profile(duration),
+            show_setup_profile(duration, backend),
             "Bluetooth setup profile unavailable",
         ),
         Command::SetupTestCertificate => (
-            show_setup_certificate_test(duration),
+            show_setup_certificate_test(duration, backend),
             "Scale setup test incomplete",
         ),
-        Command::SetupCheck => return check_setup(duration),
-        Command::RegisterScale => (register_scale(duration), "Scale registration incomplete"),
-        Command::XiaomiSignIn => (show_xiaomi_sign_in(), "Xiaomi sign-in incomplete"),
-        Command::XiaomiCloudCheck => (check_xiaomi_cloud(), "Xiaomi cloud check incomplete"),
+        Command::SetupCheck => return check_setup(duration, backend),
+        Command::RegisterScale => (
+            register_scale(duration, backend),
+            "Scale registration incomplete",
+        ),
+        Command::XiaomiSignIn => (show_xiaomi_sign_in(backend), "Xiaomi sign-in incomplete"),
+        Command::XiaomiCloudCheck => (check_xiaomi_cloud(backend), "Xiaomi cloud check incomplete"),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -137,13 +166,13 @@ fn run(seconds: u64, command: Command) -> ExitCode {
 }
 
 #[cfg(windows)]
-fn check_setup(duration: std::time::Duration) -> ExitCode {
+fn check_setup(duration: Duration, backend: &impl ScaleOperations) -> ExitCode {
     println!(
         "Step on the S200 to wake it. The Bluetooth scan lasts up to {} seconds.",
         duration.as_secs()
     );
     let mut checks = TerminalSetupChecks::default();
-    xiaomi_s200::check_scale_setup(duration, &mut checks);
+    backend.check_setup(duration, &mut checks);
     let TerminalSetupChecks {
         passed,
         failed,
@@ -194,17 +223,17 @@ impl SetupCheckObserver for TerminalSetupChecks {
 }
 
 #[cfg(windows)]
-fn show_xiaomi_sign_in() -> std::io::Result<()> {
+fn show_xiaomi_sign_in(backend: &impl ScaleOperations) -> std::io::Result<()> {
     println!("Requesting a browser sign-in link from Xiaomi...");
-    xiaomi_s200::verify_xiaomi_sign_in(&mut TerminalSignIn)?;
+    backend.sign_in(&mut TerminalSignIn, AccountCheck::SignIn)?;
     println!("Xiaomi issued a smart-home account session. Sign-in confirmed.");
     Ok(())
 }
 
 #[cfg(windows)]
-fn check_xiaomi_cloud() -> std::io::Result<()> {
+fn check_xiaomi_cloud(backend: &impl ScaleOperations) -> std::io::Result<()> {
     println!("Requesting a browser sign-in link to check Xiaomi's Europe API...");
-    xiaomi_s200::verify_xiaomi_cloud_europe(&mut TerminalSignIn)?;
+    backend.sign_in(&mut TerminalSignIn, AccountCheck::EuropeApi)?;
     println!("Xiaomi's Europe API accepted the signed request.");
     Ok(())
 }
@@ -227,13 +256,13 @@ fn present_xiaomi_link(link: &XiaomiSignInLink) {
 }
 
 #[cfg(windows)]
-fn show_connection(duration: std::time::Duration) -> std::io::Result<()> {
-    let scale = xiaomi_s200::find_connectable_scale(duration)?;
+fn show_connection(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
+    let scale = backend.find_scale(duration, ScaleSelection::Connectable)?;
     println!(
         "Found a Xiaomi Smart Scale S200 at {}. Requesting its GATT services...",
         scale.address(),
     );
-    let services = xiaomi_s200::read_services(&scale)?;
+    let services = backend.services(&scale)?;
     println!(
         "Connected. The scale returned {} GATT services.",
         services.len()
@@ -245,10 +274,10 @@ fn show_connection(duration: std::time::Duration) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
+fn show_weight(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
     use std::io;
 
-    let logins = match SavedScaleLogins::load_default() {
+    let logins = match backend.logins() {
         Ok(logins) => logins,
         Err(error) => {
             eprintln!("S200 credentials: {error}");
@@ -258,7 +287,7 @@ fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
     for warning in logins.warnings() {
         eprintln!("S200 credentials: {warning}");
     }
-    let bind_key = match xiaomi_s200::ScaleBindKey::from_environment() {
+    let bind_key = match backend.bind_key() {
         Err(error) if !logins.is_empty() => {
             eprintln!("S200 bind key: {error}");
             None
@@ -281,16 +310,16 @@ fn show_weight(duration: std::time::Duration) -> std::io::Result<()> {
         reading: None,
     };
     if let Some(key) = bind_key {
-        xiaomi_s200::discover_scales_with_weight(duration, &key, &mut scan)?;
+        backend.scan(duration, Some(&key), &mut scan)?;
     } else {
-        xiaomi_s200::discover_scales(duration, &mut scan)?;
+        backend.scan(duration, None, &mut scan)?;
     }
     if let Some(scale) = scan.target
         && let Some(token) = logins.token_for(&scale)
     {
         let address = scale.address();
         println!("Connecting to {address} with its saved login token...");
-        return xiaomi_s200::listen_for_connected_weight(
+        return backend.read_weight(
             &scale,
             token,
             duration,
@@ -352,7 +381,7 @@ impl WeightSessionObserver for TerminalWeightDisplay {
 }
 
 #[cfg(windows)]
-fn show_setup_info(duration: std::time::Duration) -> std::io::Result<()> {
+fn show_setup_info(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
     use std::io;
 
     println!(
@@ -360,7 +389,7 @@ fn show_setup_info(duration: std::time::Duration) -> std::io::Result<()> {
         duration.as_secs()
     );
     let mut scan = TerminalSetupInfo::default();
-    xiaomi_s200::discover_scales(duration, &mut scan)?;
+    backend.scan(duration, None, &mut scan)?;
     if scan.reports.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -391,16 +420,16 @@ impl ScaleScanObserver for TerminalSetupInfo {
 }
 
 #[cfg(windows)]
-fn show_setup_profile(duration: std::time::Duration) -> std::io::Result<()> {
+fn show_setup_profile(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
     println!(
         "Scanning for an unpaired S200 for up to {} seconds. Step on the scale to wake it.",
         duration.as_secs()
     );
-    let scale = xiaomi_s200::find_registration_scale(duration)?;
+    let scale = backend.find_scale(duration, ScaleSelection::Unregistered)?;
     if let Some(info) = scale.setup_info() {
         println!("{}  {info}", scale.address());
     }
-    let profile = xiaomi_s200::probe_setup_profile(&scale)?;
+    let profile = backend.profile(&scale)?;
     println!("Bluetooth setup profile: {profile}");
     if profile.supports_registration() {
         println!("This profile supports the app's registration flow.");
@@ -419,9 +448,9 @@ fn run(_seconds: u64, _command: Command) -> ExitCode {
 }
 
 #[cfg(windows)]
-fn register_scale(duration: std::time::Duration) -> std::io::Result<()> {
-    let credentials = xiaomi_s200::default_registration_directory()?;
-    let scale = xiaomi_s200::register_scale_europe(
+fn register_scale(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
+    let credentials = backend.credentials_directory()?;
+    let scale = backend.register(
         duration,
         &credentials,
         &mut TerminalRegistration {
@@ -470,7 +499,10 @@ impl RegistrationObserver for TerminalRegistration {
 }
 
 #[cfg(windows)]
-fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result<()> {
+fn show_setup_certificate_test(
+    duration: Duration,
+    backend: &impl ScaleOperations,
+) -> std::io::Result<()> {
     use std::io;
     use xiaomi_s200::SetupCertificateReply;
 
@@ -478,13 +510,13 @@ fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result
         "Looking for an unregistered S200 ms113 for up to {} seconds. Step on the scale to wake it.",
         duration.as_secs()
     );
-    let scale = xiaomi_s200::find_registration_scale(duration)?;
+    let scale = backend.find_scale(duration, ScaleSelection::Unregistered)?;
     if let Some(info) = scale.setup_info() {
         println!("{info}");
     }
     println!("Starting Standard Auth setup with {}.", scale.address());
-    let credentials_directory = xiaomi_s200::default_registration_directory()?;
-    let reply = xiaomi_s200::send_setup_test_certificate(&scale, &credentials_directory)?;
+    let credentials_directory = backend.credentials_directory()?;
+    let reply = backend.test_certificate(&scale, &credentials_directory)?;
     match reply {
         SetupCertificateReply::RegistrationSucceeded => {
             println!(
@@ -502,6 +534,63 @@ fn show_setup_certificate_test(duration: std::time::Duration) -> std::io::Result
         }
         SetupCertificateReply::RegistrationFailed | SetupCertificateReply::AlreadyRegistered => {
             Err(io::Error::other(reply.to_string()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, parse_args};
+
+    #[test]
+    fn parses_defaults_and_each_command() {
+        assert_eq!(parse_args([]), Ok(Some((30, Command::Services))));
+        for (flag, command) in [
+            ("--scale", Command::Services),
+            ("--weight", Command::Weight),
+            ("--setup-info", Command::SetupInfo),
+            ("--setup-profile", Command::SetupProfile),
+            ("--setup-test-cert", Command::SetupTestCertificate),
+            ("--check-setup", Command::SetupCheck),
+            ("--register-scale", Command::RegisterScale),
+            ("--xiaomi-sign-in", Command::XiaomiSignIn),
+            ("--xiaomi-check-cloud", Command::XiaomiCloudCheck),
+        ] {
+            assert_eq!(parse_args([flag.into()]), Ok(Some((30, command))));
+        }
+        assert_eq!(
+            parse_args(["--seconds", "1", "--weight"].map(Into::into)),
+            Ok(Some((1, Command::Weight)))
+        );
+        assert_eq!(
+            parse_args(["--scale", "--seconds", "60"].map(Into::into)),
+            Ok(Some((60, Command::Services)))
+        );
+    }
+
+    #[test]
+    fn accepts_help_only_when_used_alone_and_rejects_invalid_invocations() {
+        for help in ["--help", "-h"] {
+            assert_eq!(parse_args([help.into()]), Ok(None));
+        }
+        for args in [
+            &["--help", "--scale"][..],
+            &["--scale", "--help"],
+            &["--seconds"],
+            &["--seconds", "0"],
+            &["--seconds", "61"],
+            &["--seconds", "NaN"],
+            &["--seconds", "1", "--seconds", "2"],
+            &["--weight", "--scale"],
+            &["--xiaomi-sign-in", "--seconds", "1"],
+            &["--seconds", "1", "--xiaomi-check-cloud"],
+            &["unknown"],
+        ] {
+            assert_eq!(
+                parse_args(args.iter().copied().map(Into::into)),
+                Err(()),
+                "{args:?}"
+            );
         }
     }
 }

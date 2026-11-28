@@ -21,14 +21,14 @@ const DEVICE_COUNT_PATH: &str = "/v2/user/get_device_cnt";
 const DEVICE_COUNT_QUERY: &str = r#"{"fetch_own":true,"fetch_share":false}"#;
 
 pub(super) fn verify_device_count(
-    client: &https::Session,
+    client: &dyn https::RequestSession,
     account: &CloudAccount,
 ) -> io::Result<()> {
     signed_request(client, account, DEVICE_COUNT_PATH, DEVICE_COUNT_QUERY).map(|_| ())
 }
 
 pub(super) fn signed_request(
-    client: &https::Session,
+    client: &dyn https::RequestSession,
     account: &CloudAccount,
     path: &str,
     data: &str,

@@ -54,7 +54,7 @@ pub fn verify_xiaomi_cloud_europe(interaction: &mut dyn ScaleSetupInteraction) -
 }
 
 pub(crate) struct EuropeSession {
-    client: https::Session,
+    client: Box<dyn https::RequestSession>,
     account: CloudAccount,
     _apartment: Apartment,
 }
@@ -63,8 +63,16 @@ impl EuropeSession {
     pub(crate) fn sign_in(interaction: &mut dyn ScaleSetupInteraction) -> io::Result<Self> {
         check_cancellation(interaction)?;
         let apartment = Apartment::initialize()?;
-        let client = https::Session::new()?;
-        let account = sign_in(&client, interaction)?;
+        let client = Box::new(https::Session::new()?);
+        Self::authorize(client, interaction, apartment)
+    }
+
+    fn authorize(
+        client: Box<dyn https::RequestSession>,
+        interaction: &mut dyn ScaleSetupInteraction,
+        apartment: Apartment,
+    ) -> io::Result<Self> {
+        let account = sign_in(client.as_ref(), interaction)?;
         Ok(Self {
             client,
             account,
@@ -73,11 +81,11 @@ impl EuropeSession {
     }
 
     pub(crate) fn verify_device_count(&self) -> io::Result<()> {
-        cloud_api::verify_device_count(&self.client, &self.account)
+        cloud_api::verify_device_count(self.client.as_ref(), &self.account)
     }
 
     fn request(&self, path: &str, data: &str) -> io::Result<JsonValue> {
-        cloud_api::signed_request(&self.client, &self.account, path, data)
+        cloud_api::signed_request(self.client.as_ref(), &self.account, path, data)
     }
 }
 
@@ -94,7 +102,7 @@ struct Authorization {
 }
 
 fn sign_in(
-    client: &https::Session,
+    client: &dyn https::RequestSession,
     interaction: &mut dyn ScaleSetupInteraction,
 ) -> io::Result<CloudAccount> {
     let bootstrap = client
@@ -158,7 +166,7 @@ impl Challenge {
 }
 
 fn wait_for_authorization(
-    client: &https::Session,
+    client: &dyn https::RequestSession,
     poll: &Url,
     deadline: Instant,
     interaction: &mut dyn ScaleSetupInteraction,
@@ -289,21 +297,246 @@ fn request_error(stage: &str, error: io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("could not {stage}: {error}"))
 }
 
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub fn fixture_sign_in_link() -> Result<XiaomiSignInLink, url::ParseError> {
+    Url::parse("https://account.xiaomi.com/longPolling/login?ticket=fixture").map(XiaomiSignInLink)
+}
+
 #[cfg(test)]
-mod tests {
-    use super::{Apartment, Challenge, account_url, authorized_callback};
+pub(crate) mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    use reqwest::header::{COOKIE, HeaderMap};
+
+    use super::*;
+    use crate::BluetoothAddress;
+
+    const CHALLENGE: &[u8] = br#"&&&START&&&{
+        "loginUrl":"https://ak.account.xiaomi.com/longPolling/login?ticket=test",
+        "lp":"https://lp.account.xiaomi.com/longPolling/login?ticket=test",
+        "timeout":60
+    }"#;
+    const AUTHORIZED: &[u8] = br#"{"ssecurity":"dGVzdA==","userId":1234,
+        "location":"https://sts.api.io.mi.com/sts?ticket=test"}"#;
+
+    struct Exchange(&'static str, io::Result<https::Response>);
+    struct Script(RefCell<VecDeque<Exchange>>);
+
+    impl Script {
+        fn new(exchanges: impl IntoIterator<Item = Exchange>) -> Self {
+            Self(RefCell::new(exchanges.into_iter().collect()))
+        }
+
+        fn take(&self, url: &Url) -> io::Result<https::Response> {
+            let Exchange(path, result) = self.0.borrow_mut().pop_front().unwrap();
+            assert_eq!(url.path(), path);
+            result
+        }
+    }
+
+    impl https::RequestSession for Script {
+        fn get(&self, url: &Url, timeout: Duration) -> io::Result<https::Response> {
+            assert!(!timeout.is_zero() && timeout <= REQUEST_TIMEOUT);
+            if url.path() == "/longPolling/loginUrl" {
+                assert_eq!(url.host_str(), Some("account.xiaomi.com"));
+                assert!(
+                    url.query_pairs()
+                        .any(|(key, val)| key == "sid" && val == "xiaomiio")
+                );
+            }
+            self.take(url)
+        }
+
+        fn post_form(
+            &self,
+            url: &Url,
+            headers: HeaderMap,
+            body: &str,
+            timeout: Duration,
+        ) -> io::Result<https::Response> {
+            assert_eq!(url.host_str(), Some("de.api.io.mi.com"));
+            assert_eq!(timeout, REQUEST_TIMEOUT);
+            assert!(headers[COOKIE].is_sensitive());
+            assert_eq!(
+                headers[COOKIE],
+                "userId=1234; serviceToken=session-fixture; yetAnotherServiceToken=session-fixture; locale=en_GB"
+            );
+            assert!(
+                url::form_urlencoded::parse(body.as_bytes()).any(|(key, _)| key == "signature")
+            );
+            self.take(url)
+        }
+    }
+
+    #[derive(Default)]
+    struct Browser {
+        links: Vec<String>,
+        cancel_after_link: bool,
+    }
+
+    impl ScaleSetupInteraction for Browser {
+        fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink) {
+            self.links.push(link.to_string());
+        }
+
+        fn setup_cancelled(&mut self) -> bool {
+            self.cancel_after_link && !self.links.is_empty()
+        }
+    }
+
+    fn reply(path: &'static str, status: u16, body: &[u8]) -> Exchange {
+        Exchange(
+            path,
+            Ok(https::Response {
+                status,
+                body: body.to_vec(),
+                service_token: None,
+            }),
+        )
+    }
+
+    pub(crate) fn fixture_session(replies: &[(&'static str, u16, &[u8])]) -> EuropeSession {
+        EuropeSession {
+            client: Box::new(Script::new(
+                replies
+                    .iter()
+                    .map(|(path, status, body)| reply(path, *status, body)),
+            )),
+            account: CloudAccount {
+                user_id: Some("1234".into()),
+                security: "dGVzdA==".into(),
+                service_token: "session-fixture".into(),
+            },
+            _apartment: Apartment::initialize().unwrap(),
+        }
+    }
+
+    #[test]
+    fn reuses_the_browser_session_for_multiple_signed_cloud_requests() {
+        let mut browser = Browser::default();
+        let authorization = format!(
+            r#"{{"code":0,"result":{{"success":true,"cloud_cert":"MA","cloud_sign":"{}","utc":1234}}}}"#,
+            <base64ct::Base64 as base64ct::Encoding>::encode_string(&[3; 64]),
+        );
+        let script = Script::new([
+            reply("/longPolling/loginUrl", 200, CHALLENGE),
+            reply("/longPolling/login", 202, b""),
+            reply("/longPolling/login", 200, AUTHORIZED),
+            Exchange(
+                "/sts",
+                Ok(https::Response {
+                    status: 302,
+                    body: Vec::new(),
+                    service_token: Some("session-fixture".into()),
+                }),
+            ),
+            reply(
+                "/app/v2/user/get_device_cnt",
+                200,
+                br#"{"code":0,"result":1}"#,
+            ),
+            reply(
+                "/app/device/bltapplydid",
+                200,
+                br#"{"code":0,"result":{"did":"blt.1.fixture"}}"#,
+            ),
+            reply(
+                "/app/v2/device/ble_standard_bind",
+                200,
+                authorization.as_bytes(),
+            ),
+            reply(
+                "/app/v2/home/device_list_page",
+                200,
+                br#"{"code":0,"result":{"list":[{"did":"blt.1.fixture"}]}}"#,
+            ),
+        ]);
+        let session = EuropeSession::authorize(
+            Box::new(script),
+            &mut browser,
+            Apartment::initialize().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            browser.links,
+            ["https://ak.account.xiaomi.com/longPolling/login?ticket=test"]
+        );
+        session.verify_device_count().unwrap();
+        let id = session
+            .allocate_device_id(BluetoothAddress(1), "token-fixture", None)
+            .unwrap();
+        assert_eq!(id.as_str(), "blt.1.fixture");
+        let authorization = session
+            .authorize_standard_registration(&id, "token-fixture", "key-fixture")
+            .unwrap();
+        assert_eq!(authorization.certificate, [0x30]);
+        assert_eq!(authorization.signature, [3; 64]);
+        assert!(session.lists_device(&id).unwrap());
+    }
+
+    #[test]
+    fn distinguishes_bootstrap_polling_callback_and_cancellation_errors() {
+        let _apartment = Apartment::initialize().unwrap();
+        for (mut browser, exchanges, kind, expected) in [
+            (
+                Browser::default(),
+                vec![reply("/longPolling/loginUrl", 503, b"")],
+                io::ErrorKind::Other,
+                "HTTP 503",
+            ),
+            (
+                Browser::default(),
+                vec![
+                    reply("/longPolling/loginUrl", 200, CHALLENGE),
+                    reply("/longPolling/login", 403, b""),
+                ],
+                io::ErrorKind::Other,
+                "HTTP 403",
+            ),
+            (
+                Browser::default(),
+                vec![
+                    reply("/longPolling/loginUrl", 200, CHALLENGE),
+                    reply("/longPolling/login", 200, AUTHORIZED),
+                    reply("/sts", 200, b""),
+                ],
+                io::ErrorKind::Other,
+                "did not issue",
+            ),
+            (
+                Browser {
+                    cancel_after_link: true,
+                    ..Browser::default()
+                },
+                vec![reply("/longPolling/loginUrl", 200, CHALLENGE)],
+                io::ErrorKind::Interrupted,
+                "interrupted",
+            ),
+        ] {
+            let script = Script::new(exchanges);
+            let error = sign_in(&script, &mut browser).err().unwrap();
+            assert_eq!(error.kind(), kind);
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(script.0.borrow().is_empty());
+        }
+        let url = account_url("https://account.xiaomi.com/poll").unwrap();
+        let error = wait_for_authorization(
+            &Script::new([]),
+            &url,
+            Instant::now() - Duration::from_millis(1),
+            &mut Browser::default(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn parses_xiaomi_browser_challenge() {
         let _apartment = Apartment::initialize().unwrap();
-        let challenge = Challenge::parse(
-            br#"&&&START&&&{
-            "loginUrl":"https://ak.account.xiaomi.com/longPolling/login?ticket=test",
-            "lp":"https://lp.account.xiaomi.com/longPolling/login?ticket=test",
-            "timeout":60
-        }"#,
-        )
-        .unwrap();
+        let challenge = Challenge::parse(CHALLENGE).unwrap();
         assert_eq!(challenge.valid_for.as_secs(), 60);
         assert_eq!(challenge.poll.host_str(), Some("lp.account.xiaomi.com"));
     }

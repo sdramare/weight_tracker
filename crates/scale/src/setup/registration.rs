@@ -10,7 +10,7 @@ use super::certificate_transfer::{
 use super::find_registration_scale_with;
 use super::registration_crypto::Registration;
 use crate::cloud_sign_in::{CloudDeviceId, EuropeSession};
-use crate::{BluetoothAddress, ScaleSetupInteraction, check_cancellation};
+use crate::{BluetoothAddress, Scale, ScaleSetupInteraction, check_cancellation};
 
 /// A stage of cloud-backed S200 registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,19 +78,71 @@ pub fn register_scale_europe(
     credentials_directory: &Path,
     observer: &mut dyn RegistrationObserver,
 ) -> io::Result<RegisteredScale> {
+    run_registration(
+        scan_time,
+        credentials_directory,
+        observer,
+        &SystemRegistration,
+    )
+}
+
+trait RegistrationServices {
+    fn sign_in(&self, observer: &mut dyn RegistrationObserver) -> io::Result<EuropeSession>;
+    fn find_scale(
+        &self,
+        scan_time: Duration,
+        observer: &mut dyn RegistrationObserver,
+    ) -> io::Result<Scale>;
+    fn transfer(
+        &self,
+        scale: &Scale,
+        authorizer: XiaomiRegistrationAuthorizer<'_>,
+    ) -> io::Result<(SetupCertificateReply, PathBuf)>;
+}
+
+struct SystemRegistration;
+
+impl RegistrationServices for SystemRegistration {
+    fn sign_in(&self, observer: &mut dyn RegistrationObserver) -> io::Result<EuropeSession> {
+        EuropeSession::sign_in(observer)
+    }
+
+    fn find_scale(
+        &self,
+        scan_time: Duration,
+        observer: &mut dyn RegistrationObserver,
+    ) -> io::Result<Scale> {
+        find_registration_scale_with(scan_time, Some(observer))
+    }
+
+    fn transfer(
+        &self,
+        scale: &Scale,
+        authorizer: XiaomiRegistrationAuthorizer<'_>,
+    ) -> io::Result<(SetupCertificateReply, PathBuf)> {
+        register_with(scale, authorizer)
+    }
+}
+
+fn run_registration(
+    scan_time: Duration,
+    credentials_directory: &Path,
+    observer: &mut dyn RegistrationObserver,
+    services: &dyn RegistrationServices,
+) -> io::Result<RegisteredScale> {
     use RegistrationEvent::{Passed, Started};
     use RegistrationStep::{
         BluetoothKeyExchange, BrowserSignIn, EuropeApi, FinishSetup, ScaleDiscovery,
     };
 
     observer.report_registration(Started(BrowserSignIn));
-    let session = EuropeSession::sign_in(observer);
+    let session = services.sign_in(observer);
     let session = complete_step(observer, BrowserSignIn, session)?;
     check_cancellation(observer)?;
     observer.report_registration(Started(EuropeApi));
     complete_step(observer, EuropeApi, session.verify_device_count())?;
     observer.report_registration(Started(ScaleDiscovery));
-    let scale = find_registration_scale_with(scan_time, Some(observer))?;
+    let scale = services.find_scale(scan_time, observer)?;
     observer.report_registration(Passed(ScaleDiscovery));
     let address = scale.address();
 
@@ -104,7 +156,7 @@ pub fn register_scale_europe(
         observer,
         previous_device: &mut previous_device,
     };
-    let (reply, credentials) = register_with(&scale, authorizer)?;
+    let (reply, credentials) = services.transfer(&scale, authorizer)?;
 
     let credentials = finish_credentials(credentials, reply)?;
     match reply {
@@ -223,14 +275,200 @@ fn complete_step<T>(
     Ok(result)
 }
 
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub fn fixture_registration(address: BluetoothAddress, credentials: PathBuf) -> RegisteredScale {
+    RegisteredScale {
+        address,
+        credentials,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::io;
-    use std::path::Path;
-    use std::time::Duration;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{RegistrationEvent, RegistrationObserver, RegistrationStep, register_scale_europe};
-    use crate::{ScaleSetupInteraction, XiaomiSignInLink};
+    use base64ct::{Base64, Encoding};
+
+    use super::*;
+    use crate::cloud_sign_in::tests::fixture_session;
+    use crate::setup::registration_crypto::RegistrationKeys;
+    use crate::{ScaleSetupInfo, SignalStrength, XiaomiSignInLink};
+
+    #[derive(Default)]
+    struct Progress {
+        started: Vec<RegistrationStep>,
+        passed: Vec<RegistrationStep>,
+        pending: Option<PathBuf>,
+    }
+
+    impl ScaleSetupInteraction for Progress {
+        fn present_xiaomi_sign_in(&mut self, _: &XiaomiSignInLink) {}
+    }
+
+    impl RegistrationObserver for Progress {
+        fn report_registration(&mut self, event: RegistrationEvent<'_>) {
+            match event {
+                RegistrationEvent::Started(step) => self.started.push(step),
+                RegistrationEvent::Passed(step) => self.passed.push(step),
+                RegistrationEvent::CredentialsSaved(path) => self.pending = Some(path.into()),
+            }
+        }
+    }
+
+    struct Fixture(SetupCertificateReply);
+
+    impl RegistrationServices for Fixture {
+        fn sign_in(&self, _: &mut dyn RegistrationObserver) -> io::Result<EuropeSession> {
+            let certificate = format!(
+                r#"{{"code":0,"result":{{"success":true,"cloud_cert":"MA","cloud_sign":"{}","utc":1234}}}}"#,
+                Base64::encode_string(&[3; 64]),
+            );
+            Ok(fixture_session(&[
+                (
+                    "/app/v2/user/get_device_cnt",
+                    200,
+                    br#"{"code":0,"result":0}"#,
+                ),
+                (
+                    "/app/device/bltapplydid",
+                    200,
+                    br#"{"code":0,"result":"blt.fixture-new"}"#,
+                ),
+                (
+                    "/app/v2/device/ble_standard_bind",
+                    200,
+                    certificate.as_bytes(),
+                ),
+                (
+                    "/app/v2/home/device_list_page",
+                    200,
+                    br#"{"code":0,"result":{"list":[{"did":"blt.fixture-old"}]}}"#,
+                ),
+            ]))
+        }
+
+        fn find_scale(
+            &self,
+            scan_time: Duration,
+            _: &mut dyn RegistrationObserver,
+        ) -> io::Result<Scale> {
+            assert_eq!(scan_time, Duration::from_secs(5));
+            Ok(Scale {
+                address: BluetoothAddress(7),
+                address_type: None,
+                name: None,
+                signal_strength: SignalStrength(-60),
+                connectable: true,
+                weight: None,
+                setup_info: ScaleSetupInfo::from_mibeacon(&[0x95, 0xfe, 0x10, 0x58, 0xcb, 0x4d]),
+            })
+        }
+
+        fn transfer(
+            &self,
+            scale: &Scale,
+            authorizer: XiaomiRegistrationAuthorizer<'_>,
+        ) -> io::Result<(SetupCertificateReply, PathBuf)> {
+            assert_eq!(scale.address(), BluetoothAddress(7));
+            let peer = RegistrationKeys::generate()?;
+            let registration = RegistrationKeys::generate()?.finish(peer.public_key())?;
+            let (proof, path) = authorizer.authorize_registration(
+                &registration,
+                CloudDeviceId::from_scale_field(b"blt.fixture-old")?,
+            )?;
+            assert_eq!(proof.certificate, [0x30]);
+            assert_eq!(proof.encrypted_id.len(), 92);
+            assert!(path.is_file());
+            Ok((self.0, path))
+        }
+    }
+
+    #[test]
+    fn reports_each_stage_and_keeps_credentials_in_the_state_confirmed_by_the_scale() {
+        use RegistrationStep::*;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s200-registration-fixture-{}-{nonce}",
+            std::process::id()
+        ));
+        let stages = [
+            BrowserSignIn,
+            EuropeApi,
+            ScaleDiscovery,
+            BluetoothKeyExchange,
+            AllocateDeviceId,
+            RequestCertificate,
+            FinishSetup,
+        ];
+        for (index, (reply, suffix, message)) in [
+            (
+                SetupCertificateReply::RegistrationSucceeded,
+                ".confirmed.keys",
+                None,
+            ),
+            (
+                SetupCertificateReply::RegistrationFailed,
+                ".rejected.keys",
+                Some("device list still shows"),
+            ),
+            (
+                SetupCertificateReply::AlreadyRegistered,
+                ".rejected.keys",
+                Some("already paired"),
+            ),
+            (
+                SetupCertificateReply::ReceivedWithoutRegistrationResult,
+                ".pending.keys",
+                Some("did not confirm"),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = root.join(index.to_string());
+            let mut observer = Progress::default();
+            let result = run_registration(
+                Duration::from_secs(5),
+                &directory,
+                &mut observer,
+                &Fixture(reply),
+            );
+            assert_eq!(observer.started, stages);
+            assert!(
+                observer
+                    .pending
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with(".pending.keys")
+            );
+            let entry = fs::read_dir(&directory).unwrap().next().unwrap().unwrap();
+            assert!(entry.file_name().to_string_lossy().ends_with(suffix));
+            assert!(
+                fs::read_to_string(entry.path())
+                    .unwrap()
+                    .contains("bluetooth_address=00:00:00:00:00:07")
+            );
+            if let Some(message) = message {
+                let error = result.err().unwrap().to_string();
+                assert!(error.contains(message), "{error}");
+                assert_eq!(observer.passed, stages[..6]);
+                if reply == SetupCertificateReply::RegistrationFailed {
+                    assert!(error.contains("different device ID"));
+                }
+            } else {
+                let registered = result.unwrap();
+                assert_eq!(registered.address(), BluetoothAddress(7));
+                assert_eq!(registered.credentials_file(), entry.path());
+                assert_eq!(observer.passed, stages);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn cancels_queued_setup_before_requesting_a_browser_link() {

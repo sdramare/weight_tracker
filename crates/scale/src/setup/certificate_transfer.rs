@@ -231,15 +231,33 @@ impl SetupLink {
     }
 
     fn read_profile(&self) -> io::Result<SetupProfile> {
-        write_packet(&self.control, &REQUEST_DEVICE_INFO)?;
-        receive_block(
-            &self.auth,
-            &self.replies,
-            DEVICE_INFO_OR_ID,
-            "device information",
-        )
-        .map(SetupProfile)
+        read_profile(&self.control, &self.auth, &self.replies)
     }
+
+    fn transfer(&self) -> io::Result<RegistrationTransfer<'_>> {
+        Ok(RegistrationTransfer {
+            control: &self.control,
+            auth: &self.auth,
+            replies: &self.replies,
+            mtu: self.service.Session()?.MaxPduSize()?,
+        })
+    }
+}
+
+struct RegistrationTransfer<'a> {
+    control: &'a dyn PacketWriter,
+    auth: &'a dyn PacketWriter,
+    replies: &'a Receiver<(Channel, Vec<u8>)>,
+    mtu: u16,
+}
+
+fn read_profile(
+    control: &dyn PacketWriter,
+    auth: &dyn PacketWriter,
+    replies: &Receiver<(Channel, Vec<u8>)>,
+) -> io::Result<SetupProfile> {
+    control.write(&REQUEST_DEVICE_INFO)?;
+    receive_block(auth, replies, DEVICE_INFO_OR_ID, "device information").map(SetupProfile)
 }
 
 pub(super) fn register_with(
@@ -249,23 +267,31 @@ pub(super) fn register_with(
     registration_status(scale)
         .map_err(|blocker| io::Error::new(io::ErrorKind::InvalidInput, blocker.message()))?;
     let link = SetupLink::open(scale)?;
-    let SetupLink {
+    register_over(&link.transfer()?, scale.address(), authorizer)
+}
+
+fn register_over(
+    transfer: &RegistrationTransfer<'_>,
+    address: crate::BluetoothAddress,
+    authorizer: impl RegistrationAuthorizer,
+) -> io::Result<(SetupCertificateReply, PathBuf)> {
+    let RegistrationTransfer {
         control,
         auth,
         replies,
-        service,
-        ..
-    } = &link;
-    let mtu = service.Session()?.MaxPduSize()?;
-    let stored_device_id = link.read_profile()?.stored_device_id().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("Connected to S200 {}. {error}", scale.address()),
-        )
-    })?;
+        mtu,
+    } = *transfer;
+    let stored_device_id = read_profile(control, auth, replies)?
+        .stored_device_id()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("Connected to S200 {address}. {error}"),
+            )
+        })?;
 
     let exchange = RegistrationKeys::generate()?;
-    write_packet(control, &START_KEY_EXCHANGE)?;
+    control.write(&START_KEY_EXCHANGE)?;
     transmit_block(
         auth,
         replies,
@@ -280,7 +306,7 @@ pub(super) fn register_with(
     let (proof, credentials) =
         authorizer.authorize_registration(&registration, stored_device_id)?;
 
-    write_packet(control, &CONFIRM_REGISTRATION)?;
+    control.write(&CONFIRM_REGISTRATION)?;
     transmit_block(
         auth,
         replies,
@@ -318,7 +344,7 @@ pub(super) fn register_with(
 }
 
 fn transmit_block(
-    auth: &GattCharacteristic,
+    auth: &dyn PacketWriter,
     replies: &Receiver<(Channel, Vec<u8>)>,
     mtu: u16,
     kind: u8,
@@ -326,10 +352,10 @@ fn transmit_block(
     description: &str,
 ) -> io::Result<()> {
     let (announcement, fragments) = block_packets(mtu, kind, payload)?;
-    write_packet(auth, &announcement)?;
+    auth.write(&announcement)?;
     require_ack(replies, READY, &format!("{description} announcement"))?;
     for fragment in fragments {
-        write_packet(auth, &fragment)?;
+        auth.write(&fragment)?;
     }
     Ok(())
 }
@@ -353,7 +379,7 @@ fn require_ack(
 }
 
 fn receive_block(
-    auth: &GattCharacteristic,
+    auth: &dyn PacketWriter,
     replies: &Receiver<(Channel, Vec<u8>)>,
     kind: u8,
     stage: &str,
@@ -374,7 +400,7 @@ pub(super) trait BlockPacketSource {
 }
 
 pub(super) fn receive_framed_block(
-    characteristic: &GattCharacteristic,
+    characteristic: &dyn PacketWriter,
     expected: Option<u8>,
     stage: &str,
     deadline: Instant,
@@ -384,7 +410,7 @@ pub(super) fn receive_framed_block(
         let packet = source.next_block_packet(deadline, stage)?;
         match packet.as_slice() {
             [0, 0, 2, block, data @ ..] if expected.is_none_or(|kind| *block == kind) => {
-                write_packet(characteristic, &SINGLE_PACKET_RECEIVED)?;
+                characteristic.write(&SINGLE_PACKET_RECEIVED)?;
                 return Ok(data.to_vec());
             }
             [0, 0, 0, block, low, high] if expected.is_none_or(|kind| *block == kind) => {
@@ -395,7 +421,7 @@ pub(super) fn receive_framed_block(
                         format!("invalid fragment count for {stage}"),
                     ));
                 }
-                write_packet(characteristic, &READY)?;
+                characteristic.write(&READY)?;
                 let mut data = Vec::new();
                 for index in 1..=count {
                     let fragment = source.next_block_packet(deadline, stage)?;
@@ -407,7 +433,7 @@ pub(super) fn receive_framed_block(
                     }
                     data.extend_from_slice(&fragment[2..]);
                 }
-                write_packet(characteristic, &FRAGMENTS_RECEIVED)?;
+                characteristic.write(&FRAGMENTS_RECEIVED)?;
                 return Ok(data);
             }
             _ => {}
@@ -480,16 +506,22 @@ pub(super) fn block_packets(mtu: u16, kind: u8, payload: &[u8]) -> io::Result<Bl
     Ok(([0, 0, 0, kind, low, high], packets))
 }
 
-pub(super) fn write_packet(characteristic: &GattCharacteristic, packet: &[u8]) -> io::Result<()> {
-    let writer = DataWriter::new()?;
-    writer.WriteBytes(packet)?;
-    let result = characteristic
-        .WriteValueWithResultAndOptionAsync(
-            &writer.DetachBuffer()?,
-            GattWriteOption::WriteWithoutResponse,
-        )?
-        .join()?;
-    check_service_status(result.Status()?)
+pub(super) trait PacketWriter {
+    fn write(&self, packet: &[u8]) -> io::Result<()>;
+}
+
+impl PacketWriter for GattCharacteristic {
+    fn write(&self, packet: &[u8]) -> io::Result<()> {
+        let writer = DataWriter::new()?;
+        writer.WriteBytes(packet)?;
+        let result = self
+            .WriteValueWithResultAndOptionAsync(
+                &writer.DetachBuffer()?,
+                GattWriteOption::WriteWithoutResponse,
+            )?
+            .join()?;
+        check_service_status(result.Status()?)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -603,11 +635,214 @@ impl Drop for Subscription {
     }
 }
 
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub fn fixture_profile(bytes: Vec<u8>) -> SetupProfile {
+    SetupProfile(bytes)
+}
+
 #[cfg(test)]
-mod tests {
-    use super::{CERTIFICATE_BLOCK, PUBLIC_KEY_BLOCK, SetupProfile, block_packets};
+pub(super) mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+    use crate::BluetoothAddress;
 
     const CERTIFICATE_PAYLOAD: &[u8] = &[0x30; 329];
+
+    #[derive(Default)]
+    pub(in crate::setup) struct PacketLog(pub(in crate::setup) RefCell<Vec<Vec<u8>>>);
+
+    impl PacketWriter for PacketLog {
+        fn write(&self, packet: &[u8]) -> io::Result<()> {
+            self.0.borrow_mut().push(packet.to_vec());
+            Ok(())
+        }
+    }
+
+    struct FixtureAuthorization;
+
+    impl RegistrationAuthorizer for FixtureAuthorization {
+        fn authorize_registration(
+            self,
+            registration: &Registration,
+            stored_device_id: Option<CloudDeviceId>,
+        ) -> io::Result<(RegistrationProof, PathBuf)> {
+            assert_eq!(stored_device_id.unwrap().as_str(), "blt.4.example000000");
+            assert_eq!(registration.login_token_hex().len(), 24);
+            Ok((
+                RegistrationProof {
+                    encrypted_id: vec![0xaa; 42],
+                    certificate: CERTIFICATE_PAYLOAD.to_vec(),
+                },
+                PathBuf::from("s200-fixture.pending.keys"),
+            ))
+        }
+    }
+
+    #[test]
+    fn registration_sends_the_complete_transfer_and_classifies_the_final_reply() {
+        let peer = RegistrationKeys::generate().unwrap();
+        for (tail, expected) in [
+            (
+                vec![(Channel::Control, vec![0x11, 0, 0, 0])],
+                Some(SetupCertificateReply::RegistrationSucceeded),
+            ),
+            (
+                vec![
+                    (Channel::Auth, FRAGMENTS_RECEIVED.to_vec()),
+                    (Channel::Control, vec![0x12, 0, 0, 0]),
+                ],
+                Some(SetupCertificateReply::RegistrationFailed),
+            ),
+            (
+                vec![(Channel::Auth, FRAGMENTS_RECEIVED.to_vec())],
+                Some(SetupCertificateReply::ReceivedWithoutRegistrationResult),
+            ),
+            (
+                vec![(Channel::Control, vec![0xe1, 0, 0, 0])],
+                Some(SetupCertificateReply::AlreadyRegistered),
+            ),
+            (vec![(Channel::Auth, TRANSFER_FAILED.to_vec())], None),
+            (vec![], None),
+        ] {
+            let control = PacketLog::default();
+            let auth = PacketLog::default();
+            let (sender, replies) = mpsc::channel();
+            let packets = [
+                (Channel::Control, vec![0xff]),
+                (Channel::Data, vec![0x42]),
+                (
+                    Channel::Auth,
+                    b"\0\0\x02\0\x02\0\0\0\0blt.4.example000000".to_vec(),
+                ),
+                (Channel::Auth, READY.to_vec()),
+                (Channel::Auth, FRAGMENTS_RECEIVED.to_vec()),
+                (Channel::Auth, vec![0, 0, 0, PUBLIC_KEY_BLOCK, 2, 0]),
+                (
+                    Channel::Auth,
+                    [&[1, 0][..], &peer.public_key()[..32]].concat(),
+                ),
+                (
+                    Channel::Auth,
+                    [&[2, 0][..], &peer.public_key()[32..]].concat(),
+                ),
+                (Channel::Auth, READY.to_vec()),
+                (Channel::Auth, FRAGMENTS_RECEIVED.to_vec()),
+                (Channel::Auth, READY.to_vec()),
+            ];
+            for packet in packets.into_iter().chain(tail) {
+                sender.send(packet).unwrap();
+            }
+            drop(sender);
+            let result = register_over(
+                &RegistrationTransfer {
+                    control: &control,
+                    auth: &auth,
+                    replies: &replies,
+                    mtu: 247,
+                },
+                BluetoothAddress(1),
+                FixtureAuthorization,
+            );
+            if let Some(expected) = expected {
+                assert_eq!(
+                    result.unwrap(),
+                    (expected, PathBuf::from("s200-fixture.pending.keys"))
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("certificate"));
+            }
+            assert_eq!(
+                *control.0.borrow(),
+                [
+                    REQUEST_DEVICE_INFO,
+                    START_KEY_EXCHANGE,
+                    CONFIRM_REGISTRATION
+                ]
+            );
+            let written = auth.0.borrow();
+            assert_eq!(written[0], SINGLE_PACKET_RECEIVED);
+            assert_eq!(written[1], [0, 0, 0, PUBLIC_KEY_BLOCK, 1, 0]);
+            assert_eq!(written[3], READY);
+            assert_eq!(written[4], FRAGMENTS_RECEIVED);
+            let (certificate_header, certificate_packets) =
+                block_packets(23, CERTIFICATE_BLOCK, CERTIFICATE_PAYLOAD).unwrap();
+            assert_eq!(written[7], certificate_header);
+            assert_eq!(written[8..], certificate_packets);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_framed_transfers_and_unexpected_acknowledgements() {
+        let auth = PacketLog::default();
+        for (packets, expected) in [
+            (
+                vec![vec![0, 0, 0, PUBLIC_KEY_BLOCK, 0, 0]],
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                vec![vec![0, 0, 0, PUBLIC_KEY_BLOCK, 1, 0], vec![2, 0, 7]],
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                vec![vec![0, 0, 2, CERTIFICATE_BLOCK, 4]],
+                io::ErrorKind::TimedOut,
+            ),
+            (vec![TRANSFER_FAILED.to_vec()], io::ErrorKind::Other),
+        ] {
+            let (sender, replies) = mpsc::channel();
+            for packet in packets {
+                sender.send((Channel::Auth, packet)).unwrap();
+            }
+            drop(sender);
+            assert_eq!(
+                receive_block(&auth, &replies, PUBLIC_KEY_BLOCK, "key")
+                    .unwrap_err()
+                    .kind(),
+                expected
+            );
+        }
+        for (channel, payload, expected) in [
+            (Channel::Control, vec![0x12, 0, 0, 0], io::ErrorKind::Other),
+            (
+                Channel::Auth,
+                TRANSFER_FAILED.to_vec(),
+                io::ErrorKind::Other,
+            ),
+            (Channel::Auth, vec![0], io::ErrorKind::TimedOut),
+        ] {
+            let (sender, replies) = mpsc::channel();
+            sender.send((channel, payload)).unwrap();
+            drop(sender);
+            assert_eq!(
+                require_ack(&replies, READY, "key").unwrap_err().kind(),
+                expected
+            );
+        }
+        assert!(block_packets(22, CERTIFICATE_BLOCK, CERTIFICATE_PAYLOAD).is_err());
+    }
+
+    #[test]
+    fn credential_state_errors_keep_the_original_path_and_registration_result() {
+        let invalid = PathBuf::from("s200-fixture.keys");
+        let error =
+            finish_credentials(invalid, SetupCertificateReply::RegistrationSucceeded).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid S200 candidate key filename")
+        );
+        let missing = std::env::temp_dir()
+            .join(format!("s200-missing-dir-{}", std::process::id()))
+            .join("no-file.pending.keys");
+        let error =
+            finish_credentials(missing, SetupCertificateReply::AlreadyRegistered).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("no-file.pending.keys"));
+        assert!(error.to_string().contains("already registered"));
+    }
 
     #[test]
     fn accepts_both_observed_device_info_formats_with_the_supported_header() {

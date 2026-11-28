@@ -78,21 +78,7 @@ pub(super) fn show(ui: &mut egui::Ui, entries: &[WeightEntry], grouping: &mut Gr
             };
             date_label(tick.value, format)
         })
-        .label_formatter(|hover| {
-            let (name, point) = match hover {
-                HoverPosition::NearDataPoint {
-                    plot_name,
-                    position,
-                    ..
-                } => (*plot_name, position),
-                HoverPosition::Elsewhere { position } => ("", position),
-            };
-            Some(format!(
-                "{name}\n{}\n{:.2} kg",
-                date_label(point.x, "%d %b %Y"),
-                point.y
-            ))
-        })
+        .label_formatter(|hover| Some(weight_hover_label(hover)))
         .show(ui, |plot| {
             let name = grouping.series_name();
             plot.points(
@@ -119,6 +105,22 @@ pub(super) fn show(ui: &mut egui::Ui, entries: &[WeightEntry], grouping: &mut Gr
     if entries.len() < 3 {
         ui.label("The 30-day forecast appears after three recorded weights.");
     }
+}
+
+fn weight_hover_label(hover: &HoverPosition<'_>) -> String {
+    let (name, point) = match hover {
+        HoverPosition::NearDataPoint {
+            plot_name,
+            position,
+            ..
+        } => (*plot_name, position),
+        HoverPosition::Elsewhere { position } => ("", position),
+    };
+    format!(
+        "{name}\n{}\n{:.2} kg",
+        date_label(point.x, "%d %b %Y"),
+        point.y
+    )
 }
 
 #[derive(Default)]
@@ -212,12 +214,86 @@ fn date_label(value: f64, format: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Local, TimeZone};
+    use chrono::{Datelike, Local, NaiveDate, TimeZone};
     use eframe::egui::{self, Shape};
-    use egui_plot::{GridInput, GridMark};
+    use egui_plot::{GridInput, GridMark, HoverPosition, PlotPoint};
     use xiaomi_s200::Weight;
 
-    use super::{GroupBy, WeightEntry, calendar_grid, grouped_points, projected_line, show};
+    use super::{
+        GroupBy, WeightEntry, calendar_grid, grouped_points, projected_line, show,
+        weight_hover_label,
+    };
+
+    #[test]
+    fn paints_measured_and_forecast_series_and_uses_years_for_long_histories() {
+        let entries = [2023, 2024, 2025]
+            .into_iter()
+            .zip([7400, 7300, 7200])
+            .map(|(year, weight)| WeightEntry {
+                measured_at_ms: Local
+                    .with_ymd_and_hms(year, 11, 26, 12, 0, 0)
+                    .single()
+                    .unwrap()
+                    .timestamp_millis(),
+                weight: Weight::from_hundredths_of_kg(weight),
+            })
+            .collect::<Vec<_>>();
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(780.0, 640.0),
+                )),
+                events: vec![egui::Event::PointerMoved(egui::pos2(333.0, 280.0))],
+                ..Default::default()
+            },
+            |ui| show(ui, &entries, &mut GroupBy::Day),
+        );
+        output.textures_delta.clear();
+        let labels = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Recorded weight"));
+        assert!(labels.contains(&"30-day forecast"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.ends_with(" 2024") || label.ends_with(" 2025"))
+        );
+    }
+
+    #[test]
+    fn hover_labels_show_the_calendar_date_and_weight_to_two_decimal_places() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 26)
+            .unwrap()
+            .num_days_from_ce();
+        let position = PlotPoint::new(f64::from(day), 72.55);
+        assert_eq!(
+            weight_hover_label(&HoverPosition::NearDataPoint {
+                plot_name: "Recorded weight",
+                position,
+                index: 0
+            }),
+            "Recorded weight\n26 Nov 2026\n72.55 kg"
+        );
+        assert_eq!(
+            weight_hover_label(&HoverPosition::Elsewhere { position }),
+            "\n26 Nov 2026\n72.55 kg"
+        );
+        assert!(
+            calendar_grid(GridInput {
+                base_step_size: f64::INFINITY,
+                bounds: (0.0, 12.0)
+            })
+            .is_empty()
+        );
+    }
 
     #[test]
     fn paints_one_date_label_for_one_weigh_in_in_every_group() {

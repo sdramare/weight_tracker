@@ -6,5 +6,8 @@ edition.workspace = true
 [target.'cfg(windows)'.dependencies]
 xiaomi-s200 = { path = "../scale" }
 
+[target.'cfg(windows)'.dev-dependencies]
+xiaomi-s200 = { path = "../scale", features = ["test-fixtures"] }
+
 [lints]
 workspace = true

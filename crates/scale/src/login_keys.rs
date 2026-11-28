@@ -55,8 +55,20 @@ pub fn default_registration_directory() -> io::Result<PathBuf> {
 impl SavedScaleLogins {
     /// Loads per-user credentials and imports valid registrations from older build directories.
     pub fn load_default() -> io::Result<Self> {
+        Self::load_from(
+            default_registration_directory(),
+            std::env::current_dir(),
+            std::env::current_exe(),
+        )
+    }
+
+    fn load_from(
+        persistent: io::Result<PathBuf>,
+        working_directory: io::Result<PathBuf>,
+        executable: io::Result<PathBuf>,
+    ) -> io::Result<Self> {
         let mut logins = Self::default();
-        let persistent = match default_registration_directory() {
+        let persistent = match persistent {
             Ok(path) => {
                 logins.load_directory(&path, None);
                 Some(path)
@@ -67,13 +79,13 @@ impl SavedScaleLogins {
             }
         };
         let mut old_targets = BTreeSet::new();
-        match std::env::current_dir() {
+        match working_directory {
             Ok(path) => {
                 old_targets.insert(path.join("target"));
             }
             Err(error) => logins.warnings.push(error),
         }
-        match std::env::current_exe() {
+        match executable {
             Ok(executable) => {
                 if let Some(target) = executable
                     .ancestors()
@@ -378,9 +390,25 @@ fn parse_hex_byte(bytes: &[u8]) -> Option<u8> {
     u8::from_str_radix(std::str::from_utf8(bytes).ok()?, 16).ok()
 }
 
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub fn fixture_logins(scale: &Scale) -> SavedScaleLogins {
+    let mut logins = SavedScaleLogins::default();
+    logins.insert(
+        Some(scale.address()),
+        CredentialState::Confirmed,
+        SavedLogin {
+            token: ScaleLoginToken([1; 12]),
+            modified: UNIX_EPOCH,
+        },
+    );
+    logins
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{CredentialState, SavedLogin, SavedScaleLogins, ScaleLoginToken, parse_login};
@@ -494,5 +522,99 @@ mod tests {
             logins.token_for(&scale_with_control(Some(0x5b))).unwrap().0,
             [2; 12]
         );
+    }
+
+    #[test]
+    fn loads_old_credentials_but_keeps_trial_tokens_out_of_the_login_pool() {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("s200-legacy-load-{}-{id}", std::process::id()));
+        let target = root.join("target");
+        let persistent = root.join("app-data");
+        let old = target.join("s200-registration");
+        let trials = target.join("s200-setup-test");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&trials).unwrap();
+        fs::create_dir_all(old.join("s200-directory.keys")).unwrap();
+        fs::write(
+            old.join("s200-winner.confirmed.keys"),
+            "login_token=010101010101010101010101\nbluetooth_address=00:00:00:00:00:01\n",
+        )
+        .unwrap();
+        fs::write(old.join("s200-rejected.rejected.keys"), "irrelevant").unwrap();
+        fs::write(
+            trials.join("test-older.keys"),
+            "login_token=020202020202020202020202\n",
+        )
+        .unwrap();
+        fs::write(trials.join("test-malformed.keys"), "invalid").unwrap();
+        fs::write(trials.join("other.keys"), "ignored").unwrap();
+
+        let logins = SavedScaleLogins::load_from(
+            Ok(persistent.clone()),
+            Ok(root.clone()),
+            Ok(target.join("debug/blt_unlock.exe")),
+        )
+        .unwrap();
+        assert_eq!(logins.warnings().len(), 1);
+        assert!(
+            logins.warnings()[0]
+                .to_string()
+                .contains("test-malformed.keys")
+        );
+        assert_eq!(
+            logins.token_for(&scale_with_control(Some(0x5b))).unwrap().0,
+            [1; 12]
+        );
+        assert!(logins.unaddressed.is_none());
+        assert_eq!(
+            fs::read_dir(persistent.join("recovery")).unwrap().count(),
+            1
+        );
+        let imported = SavedScaleLogins::load_from(
+            Ok(persistent),
+            Err(io::Error::other("working directory unavailable")),
+            Err(io::Error::other("executable unavailable")),
+        )
+        .unwrap();
+        assert_eq!(imported.warnings().len(), 2);
+        assert_eq!(
+            imported
+                .token_for(&scale_with_control(Some(0x5b)))
+                .unwrap()
+                .0,
+            [1; 12]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selects_the_newest_key_and_never_uses_ambiguous_unaddressed_tokens() {
+        let scale = scale_with_control(Some(0x5b));
+        let saved = |key, time| SavedLogin {
+            token: ScaleLoginToken([key; 12]),
+            modified: UNIX_EPOCH + Duration::from_secs(time),
+        };
+        let mut logins = SavedScaleLogins::default();
+        logins.insert(None, CredentialState::Pending, saved(8, 1));
+        assert!(logins.is_empty());
+        logins.insert(None, CredentialState::Legacy, saved(1, 2));
+        logins.insert(None, CredentialState::Legacy, saved(1, 3));
+        assert_eq!(logins.token_for(&scale).unwrap().0, [1; 12]);
+        logins.insert(None, CredentialState::Legacy, saved(2, 4));
+        assert!(logins.is_empty());
+        assert!(logins.token_for(&scale).is_none());
+        for (key, time) in [(3, 8), (4, 7), (5, 9)] {
+            logins.insert(
+                Some(scale.address()),
+                CredentialState::Confirmed,
+                saved(key, time),
+            );
+        }
+        assert!(!logins.is_empty());
+        assert_eq!(logins.token_for(&scale).unwrap().0, [5; 12]);
     }
 }

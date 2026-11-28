@@ -28,6 +28,12 @@ pub use registration::{
     register_scale_europe,
 };
 
+#[cfg(feature = "test-fixtures")]
+pub use registration::fixture_registration;
+
+#[cfg(feature = "test-fixtures")]
+pub use certificate_transfer::fixture_profile;
+
 /// Finds the first connectable S200 ms113 that advertises unregistered Standard Auth.
 pub fn find_registration_scale(duration: Duration) -> io::Result<Scale> {
     find_registration_scale_with(duration, None)
@@ -49,21 +55,27 @@ fn find_registration_scale_with(
     if !scan.should_scan() {
         return Err(io::ErrorKind::Interrupted.into());
     }
-    scan.candidate.ok_or_else(|| {
-        scan.blockers.into_values().max().map_or_else(
-            || io::Error::new(
-                io::ErrorKind::NotFound,
-                "Windows did not see an S200 during this scan. Keep the scale near this PC and step on it when setup starts scanning.",
-            ),
-            |blocker| io::Error::new(io::ErrorKind::NotFound, blocker.message()),
-        )
-    })
+    scan.finish()
 }
 
 struct RegistrationScaleSearch<'a> {
     interaction: Option<&'a mut dyn ScaleSetupInteraction>,
     candidate: Option<Scale>,
     blockers: HashMap<super::BluetoothAddress, SetupBlocker>,
+}
+
+impl RegistrationScaleSearch<'_> {
+    fn finish(self) -> io::Result<Scale> {
+        self.candidate.ok_or_else(|| {
+            self.blockers.into_values().max().map_or_else(
+                || io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Windows did not see an S200 during this scan. Keep the scale near this PC and step on it when setup starts scanning.",
+                ),
+                |blocker| io::Error::new(io::ErrorKind::NotFound, blocker.message()),
+            )
+        })
+    }
 }
 
 impl ScaleScanObserver for RegistrationScaleSearch<'_> {
@@ -314,7 +326,7 @@ impl fmt::Display for ScaleSetupInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{Authentication, ScaleSetupInfo, SetupBlocker, SetupFlags, registration_status};
+    use super::*;
     use crate::{BluetoothAddress, Scale, SignalStrength};
 
     #[test]
@@ -387,5 +399,88 @@ mod tests {
             };
             assert_eq!(registration_status(&scale), expected, "0x{control:02X}");
         }
+    }
+
+    fn candidate(control: u8, product: [u8; 2], connectable: bool) -> Scale {
+        Scale {
+            address: BluetoothAddress(1),
+            address_type: None,
+            name: None,
+            signal_strength: SignalStrength(-59),
+            connectable,
+            weight: None,
+            setup_info: ScaleSetupInfo::from_mibeacon_frame(&[
+                0x10, control, product[0], product[1],
+            ]),
+        }
+    }
+
+    #[test]
+    fn distinguishes_missing_broadcasts_and_reports_the_latest_blocker_for_a_scale() {
+        let search = || RegistrationScaleSearch {
+            interaction: None,
+            candidate: None,
+            blockers: HashMap::new(),
+        };
+        assert!(
+            search()
+                .finish()
+                .unwrap_err()
+                .to_string()
+                .contains("did not see an S200")
+        );
+
+        for (control, model, message, display) in [
+            (0x58, [0, 0], "did not receive its setup information", ""),
+            (
+                0x58,
+                [0x04, 0x4c],
+                "cannot set up",
+                "standard authentication",
+            ),
+            (
+                0x48,
+                [0xcb, 0x4d],
+                "supported setup status",
+                "setup flags unavailable",
+            ),
+            (
+                0x50,
+                [0xcb, 0x4d],
+                "does not support for setup",
+                "legacy authentication",
+            ),
+            (
+                0x54,
+                [0xcb, 0x4d],
+                "does not support for setup",
+                "secure authentication",
+            ),
+            (
+                0x5c,
+                [0xcb, 0x4d],
+                "does not support for setup",
+                "reserved authentication",
+            ),
+            (0x59, [0xcb, 0x4d], "existing pairing", "registered"),
+            (0x58, [0xcb, 0x4d], "connection offer", "unregistered"),
+        ] {
+            let mut scan = search();
+            let scale = candidate(control, model, false);
+            assert!(scan.should_scan());
+            assert!(scan.scale_discovered(&scale, None).is_continue());
+            assert!(scan.finish().unwrap_err().to_string().contains(message));
+            if let Some(info) = scale.setup_info() {
+                assert!(info.to_string().contains(display));
+            }
+        }
+        let mut scan = search();
+        assert!(
+            scan.scale_discovered(&candidate(0x59, [0xcb, 0x4d], true), None)
+                .is_continue()
+        );
+        let eligible = candidate(0x58, [0xcb, 0x4d], true);
+        assert!(scan.scale_discovered(&eligible, None).is_break());
+        assert_eq!(scan.finish().unwrap(), eligible);
     }
 }
