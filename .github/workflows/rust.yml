@@ -11,12 +11,21 @@ env:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Checked Windows build
+      if: runner.os == 'Windows'
+      shell: cmd
+      run: call build.cmd
+    - name: Clippy on Linux
+      if: runner.os == 'Linux'
+      run: cargo clippy --locked --workspace --all-targets
+    - name: Run workspace tests
+      run: cargo test --locked --workspace

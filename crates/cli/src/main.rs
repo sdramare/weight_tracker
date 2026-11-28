@@ -1,8 +1,8 @@
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::{collections::BTreeMap, ops::ControlFlow, time::Duration};
 use std::{ffi::OsString, process::ExitCode};
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use xiaomi_s200::{
     BluetoothAddress, ConnectedWeightEvent, RegistrationEvent, RegistrationObserver,
     RegistrationStep, SavedScaleLogins, Scale, ScaleScanObserver, ScaleSetupInfo,
@@ -10,12 +10,14 @@ use xiaomi_s200::{
     WeightSessionObserver, XiaomiSignInLink,
 };
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod backend;
 #[cfg(windows)]
-use backend::{AccountCheck, ScaleOperations, ScaleSelection, WindowsScale};
-#[cfg(all(windows, test))]
-mod windows_tests;
+use backend::WindowsScale;
+#[cfg(any(windows, test))]
+use backend::{AccountCheck, ScaleOperations, ScaleSelection};
+#[cfg(test)]
+mod command_tests;
 
 const USAGE: &str = "Usage: blt_unlock [--scale | --weight | --setup-info | --setup-profile | --setup-test-cert | --check-setup] [--seconds <1-60>]\n\
     blt_unlock --register-scale [--seconds <1-60>]\n\
@@ -122,7 +124,7 @@ fn run(seconds: u64, command: Command) -> ExitCode {
     run_with(seconds, command, &WindowsScale)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn run_with(seconds: u64, command: Command, backend: &impl ScaleOperations) -> ExitCode {
     let duration = Duration::from_secs(seconds);
     let (result, error_label) = match command {
@@ -165,7 +167,7 @@ fn run_with(seconds: u64, command: Command, backend: &impl ScaleOperations) -> E
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn check_setup(duration: Duration, backend: &impl ScaleOperations) -> ExitCode {
     println!(
         "Step on the S200 to wake it. The Bluetooth scan lasts up to {} seconds.",
@@ -186,7 +188,7 @@ fn check_setup(duration: Duration, backend: &impl ScaleOperations) -> ExitCode {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[derive(Default)]
 struct TerminalSetupChecks {
     passed: usize,
@@ -194,14 +196,14 @@ struct TerminalSetupChecks {
     skipped: usize,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl ScaleSetupInteraction for TerminalSetupChecks {
     fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink) {
         present_xiaomi_link(link);
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl SetupCheckObserver for TerminalSetupChecks {
     fn report_setup_check(&mut self, check: SetupCheck, status: SetupCheckStatus<'_>) {
         match status {
@@ -222,7 +224,7 @@ impl SetupCheckObserver for TerminalSetupChecks {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn show_xiaomi_sign_in(backend: &impl ScaleOperations) -> std::io::Result<()> {
     println!("Requesting a browser sign-in link from Xiaomi...");
     backend.sign_in(&mut TerminalSignIn, AccountCheck::SignIn)?;
@@ -230,7 +232,7 @@ fn show_xiaomi_sign_in(backend: &impl ScaleOperations) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn check_xiaomi_cloud(backend: &impl ScaleOperations) -> std::io::Result<()> {
     println!("Requesting a browser sign-in link to check Xiaomi's Europe API...");
     backend.sign_in(&mut TerminalSignIn, AccountCheck::EuropeApi)?;
@@ -238,24 +240,24 @@ fn check_xiaomi_cloud(backend: &impl ScaleOperations) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 struct TerminalSignIn;
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl ScaleSetupInteraction for TerminalSignIn {
     fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink) {
         present_xiaomi_link(link);
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn present_xiaomi_link(link: &XiaomiSignInLink) {
     println!("Open this one-time link in your browser and sign in on Xiaomi’s page.");
     println!("{link}");
     println!("Keep this terminal open while Xiaomi confirms sign-in.");
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn show_connection(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
     let scale = backend.find_scale(duration, ScaleSelection::Connectable)?;
     println!(
@@ -273,7 +275,7 @@ fn show_connection(duration: Duration, backend: &impl ScaleOperations) -> std::i
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn show_weight(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
     use std::io;
 
@@ -336,14 +338,14 @@ fn show_weight(duration: Duration, backend: &impl ScaleOperations) -> std::io::R
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 struct TerminalWeightScan<'a> {
     logins: &'a SavedScaleLogins,
     target: Option<Scale>,
     reading: Option<(BluetoothAddress, Weight)>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl ScaleScanObserver for TerminalWeightScan<'_> {
     fn scale_discovered(&mut self, scale: &Scale, _: Option<Weight>) -> ControlFlow<()> {
         if let Some(weight) = scale.weight() {
@@ -358,12 +360,12 @@ impl ScaleScanObserver for TerminalWeightScan<'_> {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 struct TerminalWeightDisplay {
     address: BluetoothAddress,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl WeightSessionObserver for TerminalWeightDisplay {
     fn on_weight_event(&mut self, event: ConnectedWeightEvent) -> ControlFlow<()> {
         let address = self.address;
@@ -380,7 +382,7 @@ impl WeightSessionObserver for TerminalWeightDisplay {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn show_setup_info(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
     use std::io;
 
@@ -399,13 +401,13 @@ fn show_setup_info(duration: Duration, backend: &impl ScaleOperations) -> std::i
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[derive(Default)]
 struct TerminalSetupInfo {
     reports: BTreeMap<BluetoothAddress, ScaleSetupInfo>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl ScaleScanObserver for TerminalSetupInfo {
     fn scale_discovered(&mut self, scale: &Scale, _: Option<Weight>) -> ControlFlow<()> {
         let Some(info) = scale.setup_info() else {
@@ -419,7 +421,7 @@ impl ScaleScanObserver for TerminalSetupInfo {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn show_setup_profile(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
     println!(
         "Scanning for an unpaired S200 for up to {} seconds. Step on the scale to wake it.",
@@ -447,7 +449,7 @@ fn run(_seconds: u64, _command: Command) -> ExitCode {
     ExitCode::FAILURE
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn register_scale(duration: Duration, backend: &impl ScaleOperations) -> std::io::Result<()> {
     let credentials = backend.credentials_directory()?;
     let scale = backend.register(
@@ -465,19 +467,19 @@ fn register_scale(duration: Duration, backend: &impl ScaleOperations) -> std::io
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 struct TerminalRegistration {
     scan_time: std::time::Duration,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl ScaleSetupInteraction for TerminalRegistration {
     fn present_xiaomi_sign_in(&mut self, link: &XiaomiSignInLink) {
         present_xiaomi_link(link);
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl RegistrationObserver for TerminalRegistration {
     fn report_registration(&mut self, event: RegistrationEvent<'_>) {
         match event {
@@ -498,7 +500,7 @@ impl RegistrationObserver for TerminalRegistration {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn show_setup_certificate_test(
     duration: Duration,
     backend: &impl ScaleOperations,

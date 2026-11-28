@@ -1,31 +1,45 @@
 use std::io;
 
+#[cfg(any(windows, test))]
 use base64ct::{Base64, Base64Unpadded, Base64Url, Base64UrlUnpadded, Encoding};
-use windows::Data::Json::{JsonObject, JsonValue};
-use windows::core::HSTRING;
+#[cfg(any(windows, test))]
+use serde_json::{Map, Value};
 
-use super::EuropeSession;
+#[cfg(any(windows, test))]
+use super::{EuropeSession, integer_text};
+#[cfg(any(windows, test))]
 use crate::BluetoothAddress;
 
+#[cfg(any(windows, test))]
 const S200_MS113_MODEL: &str = "xiaomi.scales.ms113";
+#[cfg(any(windows, test))]
 const ALLOCATE_DEVICE_ID_PATH: &str = "/device/bltapplydid";
+#[cfg(any(windows, test))]
 const STANDARD_BIND_PATH: &str = "/v2/device/ble_standard_bind";
+#[cfg(any(windows, test))]
 const DEVICE_LIST_PATH: &str = "/v2/home/device_list_page";
 
 pub(crate) struct CloudDeviceId(String);
 
+impl std::fmt::Display for CloudDeviceId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 impl CloudDeviceId {
+    #[cfg(any(windows, test))]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
-    fn from_reply(result: &JsonValue) -> io::Result<Self> {
+    #[cfg(any(windows, test))]
+    fn from_reply(result: &Value) -> io::Result<Self> {
         let value = result
-            .GetString()
-            .or_else(|_| result.GetObject()?.GetNamedString(&HSTRING::from("did")))
-            .map_err(|_| invalid_reply("Xiaomi did not return a BLE device ID"))?
-            .to_string_lossy();
-        Self::parse(&value).ok_or_else(|| invalid_reply("Xiaomi returned an invalid BLE device ID"))
+            .as_str()
+            .or_else(|| result.get("did")?.as_str())
+            .ok_or_else(|| invalid_reply("Xiaomi did not return a BLE device ID"))?;
+        Self::parse(value).ok_or_else(|| invalid_reply("Xiaomi returned an invalid BLE device ID"))
     }
 
     pub(crate) fn from_scale_field(field: &[u8]) -> io::Result<Option<Self>> {
@@ -49,42 +63,42 @@ impl CloudDeviceId {
     }
 }
 
+#[cfg(any(windows, test))]
 pub(crate) struct CloudAuthorization {
     pub(crate) certificate: Vec<u8>,
     pub(crate) signature: [u8; 64],
     pub(crate) utc: u32,
 }
 
+#[cfg(any(windows, test))]
 impl CloudAuthorization {
-    fn from_reply(result: &JsonValue) -> io::Result<Self> {
+    fn from_reply(result: &Value) -> io::Result<Self> {
         let reply = result
-            .GetObject()
-            .map_err(|_| invalid_reply("Xiaomi returned an invalid registration response"))?;
-        if !reply
-            .GetNamedBoolean(&HSTRING::from("success"))
-            .unwrap_or(false)
-        {
+            .as_object()
+            .ok_or_else(|| invalid_reply("Xiaomi returned an invalid registration response"))?;
+        if reply.get("success").and_then(Value::as_bool) != Some(true) {
             return Err(io::Error::other(
                 "Xiaomi declined to authorize BLE registration",
             ));
         }
-        let certificate = authorization_bytes(&reply, "cloud_cert")?;
+        let certificate = authorization_bytes(reply, "cloud_cert")?;
         if certificate.first() != Some(&0x30) || certificate.len() > 4096 {
             return Err(invalid_reply(
                 "Xiaomi returned an invalid registration certificate",
             ));
         }
-        let signature = authorization_bytes(&reply, "cloud_sign")?
+        let signature = authorization_bytes(reply, "cloud_sign")?
             .try_into()
             .map_err(|_| {
                 invalid_reply("Xiaomi returned a registration signature of the wrong length")
             })?;
-        let utc_field = HSTRING::from("utc");
         let utc = reply
-            .GetNamedString(&utc_field)
-            .or_else(|_| reply.GetNamedValue(&utc_field)?.Stringify())
-            .ok()
-            .and_then(|value| value.to_string_lossy().parse().ok())
+            .get("utc")
+            .and_then(|value| match value {
+                Value::String(text) => text.parse().ok(),
+                Value::Number(value) => integer_text(value)?.parse().ok(),
+                _ => None,
+            })
             .filter(|utc| *utc != 0)
             .ok_or_else(|| invalid_reply("Xiaomi returned an invalid registration timestamp"))?;
         Ok(Self {
@@ -95,6 +109,7 @@ impl CloudAuthorization {
     }
 }
 
+#[cfg(any(windows, test))]
 impl EuropeSession {
     pub(crate) fn allocate_device_id(
         &self,
@@ -120,7 +135,7 @@ impl EuropeSession {
                 r#"{{"type":"prop","key":"bind_key","value":"{key}"}},"#,
                 r#"{{"type":"prop","key":"smac","value":""}}],"beacon_key":"{key}"}}"#,
             ),
-            device_id = device_id.as_str(),
+            device_id = device_id,
             token = login_token_hex,
             key = bind_key_hex,
         );
@@ -131,13 +146,14 @@ impl EuropeSession {
     pub(crate) fn lists_device(&self, device_id: &CloudDeviceId) -> io::Result<bool> {
         let data = format!(
             r#"{{"limit":200,"get_split_device":true,"get_third_device":true,"dids":["{device_id}"]}}"#,
-            device_id = device_id.as_str(),
+            device_id = device_id,
         );
         let result = self.request(DEVICE_LIST_PATH, &data)?;
         device_list_contains(&result, device_id)
     }
 }
 
+#[cfg(any(windows, test))]
 fn device_id_request(
     address: BluetoothAddress,
     login_token_hex: &str,
@@ -145,48 +161,47 @@ fn device_id_request(
 ) -> String {
     // Xiaomi Home includes the old DID in this request when the scale supplies one.
     let stored_field = stored_device_id
-        .map(|id| format!(r#","did":"{}""#, id.as_str()))
+        .map(|id| format!(r#","did":"{id}""#))
         .unwrap_or_default();
     format!(
         r#"{{"mac":"{address}","model":"{S200_MS113_MODEL}","token":"{login_token_hex}"{stored_field}}}"#,
     )
 }
 
-fn device_list_contains(result: &JsonValue, device_id: &CloudDeviceId) -> io::Result<bool> {
+#[cfg(any(windows, test))]
+fn device_list_contains(result: &Value, device_id: &CloudDeviceId) -> io::Result<bool> {
     let result = result
-        .GetObject()
-        .map_err(|_| invalid_reply("Xiaomi returned an invalid device list"))?;
+        .as_object()
+        .ok_or_else(|| invalid_reply("Xiaomi returned an invalid device list"))?;
     let entries = result
-        .GetNamedArray(&HSTRING::from("list"))
-        .map_err(|_| invalid_reply("Xiaomi did not return a device list"))?;
-    let did_key = HSTRING::from("did");
+        .get("list")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_reply("Xiaomi did not return a device list"))?;
     for entry in entries {
         let id = entry
-            .GetObject()
-            .and_then(|entry| entry.GetNamedString(&did_key))
-            .map_err(|_| invalid_reply("Xiaomi returned an entry without a device ID"))?;
+            .get("did")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_reply("Xiaomi returned an entry without a device ID"))?;
         if id == device_id.as_str() {
             return Ok(true);
         }
     }
-    if result
-        .GetNamedBoolean(&HSTRING::from("has_more"))
-        .unwrap_or(false)
-    {
+    if result.get("has_more").and_then(Value::as_bool) == Some(true) {
         return Err(invalid_reply("Xiaomi returned an incomplete device list"));
     }
     Ok(false)
 }
 
-fn authorization_bytes(reply: &JsonObject, key: &str) -> io::Result<Vec<u8>> {
+#[cfg(any(windows, test))]
+fn authorization_bytes(reply: &Map<String, Value>, key: &str) -> io::Result<Vec<u8>> {
     let value = reply
-        .GetNamedString(&HSTRING::from(key))
-        .map_err(|_| invalid_reply("Xiaomi omitted registration authorization data"))?
-        .to_string_lossy();
-    Base64Url::decode_vec(&value)
-        .or_else(|_| Base64UrlUnpadded::decode_vec(&value))
-        .or_else(|_| Base64::decode_vec(&value))
-        .or_else(|_| Base64Unpadded::decode_vec(&value))
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_reply("Xiaomi omitted registration authorization data"))?;
+    Base64Url::decode_vec(value)
+        .or_else(|_| Base64UrlUnpadded::decode_vec(value))
+        .or_else(|_| Base64::decode_vec(value))
+        .or_else(|_| Base64Unpadded::decode_vec(value))
         .map_err(|_| invalid_reply("Xiaomi returned invalid registration authorization data"))
 }
 
@@ -197,36 +212,32 @@ fn invalid_reply(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64UrlUnpadded, Encoding};
-    use windows::Data::Json::JsonValue;
-    use windows::core::HSTRING;
+    use serde_json::{from_str, json};
 
     use super::{CloudAuthorization, CloudDeviceId, device_id_request, device_list_contains};
-    use crate::{Apartment, BluetoothAddress};
+    use crate::BluetoothAddress;
 
     #[test]
     fn parses_the_device_id_and_authorization_from_xiaomi() {
-        let _apartment = Apartment::initialize().unwrap();
-        let did = JsonValue::Parse(&HSTRING::from(r#""blt.3.test-dev""#)).unwrap();
+        let did = json!("blt.3.test-dev");
         assert_eq!(
             CloudDeviceId::from_reply(&did).unwrap().as_str(),
             "blt.3.test-dev"
         );
         let cert = Base64UrlUnpadded::encode_string(&[0x30, 0x01, 0xfb]);
         let signature = Base64UrlUnpadded::encode_string(&[0xe1; 64]);
-        let reply = JsonValue::Parse(&HSTRING::from(format!(
-            r#"{{"success":true,"cloud_cert":"{cert}","cloud_sign":"{signature}","utc":1795700991}}"#
-        ))).unwrap();
+        let reply =
+            json!({"success":true,"cloud_cert":cert,"cloud_sign":signature,"utc":1795700991.0});
         let grant = CloudAuthorization::from_reply(&reply).unwrap();
         assert_eq!(grant.certificate, [0x30, 0x01, 0xfb]);
         assert_eq!(grant.signature, [0xe1; 64]);
         assert_eq!(grant.utc, 1795700991);
-        let denied = JsonValue::Parse(&HSTRING::from(r#"{"success":false}"#)).unwrap();
+        let denied = json!({"success":false});
         assert!(CloudAuthorization::from_reply(&denied).is_err());
     }
 
     #[test]
     fn checks_the_exact_stored_device_id_in_a_complete_cloud_list() {
-        let _apartment = Apartment::initialize().unwrap();
         let stored = CloudDeviceId::parse("blt.4.example000000").unwrap();
         let fixtures = [
             (r#"{"list":[{"did":"blt.4.example000000"}]}"#, Some(true)),
@@ -235,7 +246,7 @@ mod tests {
             (r#"{}"#, None),
         ];
         for (json, expected) in fixtures {
-            let result = JsonValue::Parse(&HSTRING::from(json)).unwrap();
+            let result = from_str(json).unwrap();
             assert_eq!(device_list_contains(&result, &stored).ok(), expected);
         }
     }

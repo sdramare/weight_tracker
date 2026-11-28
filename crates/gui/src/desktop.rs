@@ -4,32 +4,41 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+#[cfg(windows)]
 use std::thread;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, RichText};
+use egui::{Color32, RichText};
 use xiaomi_s200::{
     BluetoothAddress, ConnectedWeightEvent, MODEL_NAME, RegisteredScale, RegistrationEvent,
     RegistrationObserver, SavedScaleLogins, Scale, ScaleBindKey, ScaleLoginToken,
     ScaleScanObserver, ScaleSetupInteraction, Weight, WeightReading, WeightSessionObserver,
-    XiaomiSignInLink, default_registration_directory, register_scale_europe,
-    watch_connected_weights, watch_scales,
+    XiaomiSignInLink,
 };
 
 use super::history::{HistoryMonitor, WeightEntry};
 use super::scale_setup::{SetupDialog, SetupRequest, SetupUpdate};
-use super::{tray, weight_plot};
+#[cfg(windows)]
+use super::tray;
+use super::weight_plot;
+#[cfg(windows)]
+use xiaomi_s200::{
+    default_registration_directory, register_scale_europe, watch_connected_weights, watch_scales,
+};
 
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const RECONNECT_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const HISTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(windows)]
 const SETUP_SCAN_TIME: Duration = Duration::from_secs(30);
 const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 243);
+#[cfg(windows)]
 const INK: Color32 = Color32::from_rgb(19, 43, 38);
 const MUTED: Color32 = Color32::from_rgb(69, 93, 84);
 const ACCENT: Color32 = Color32::from_rgb(17, 102, 80);
 const BORDER: Color32 = Color32::from_rgb(214, 224, 217);
 
+#[cfg(windows)]
 pub fn run() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/scale-icon.png")).ok();
     let mut viewport = egui::ViewportBuilder::default()
@@ -85,11 +94,13 @@ struct ScaleApp {
     history: Vec<WeightEntry>,
     history_error: Option<String>,
     group_by: weight_plot::GroupBy,
+    #[cfg(windows)]
     _tray: Option<tray::Tray>,
     tray_error: Option<String>,
 }
 
 impl ScaleApp {
+    #[cfg(windows)]
     fn new(creation: &eframe::CreationContext<'_>, icon: Option<&egui::IconData>) -> Self {
         let context = &creation.egui_ctx;
         let mut visuals = egui::Visuals::light();
@@ -237,6 +248,7 @@ impl Drop for ScaleApp {
     }
 }
 
+#[cfg(windows)]
 fn monitor_scales(
     setup_commands: Receiver<SetupRequest>,
     listening: &AtomicBool,
@@ -280,8 +292,10 @@ trait ScaleBackend {
     fn register(&self, observer: &mut dyn RegistrationObserver) -> io::Result<RegisteredScale>;
 }
 
+#[cfg(windows)]
 struct WindowsScaleBackend;
 
+#[cfg(windows)]
 impl ScaleBackend for WindowsScaleBackend {
     fn saved_logins(&self) -> io::Result<SavedScaleLogins> {
         SavedScaleLogins::load_default()
@@ -620,6 +634,7 @@ impl RegistrationObserver for DesktopRegistration<'_, '_> {
     }
 }
 
+#[cfg(windows)]
 impl eframe::App for ScaleApp {
     fn logic(&mut self, _context: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_events();
@@ -761,6 +776,7 @@ mod tests {
                 history: Vec::new(),
                 history_error: None,
                 group_by: weight_plot::GroupBy::Day,
+                #[cfg(windows)]
                 _tray: None,
                 tray_error: Some("icon unavailable".into()),
             },

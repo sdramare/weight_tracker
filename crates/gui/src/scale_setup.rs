@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
-use eframe::egui;
 use xiaomi_s200::{RegisteredScale, RegistrationStep};
 
 pub(super) struct SetupRequest(Arc<AtomicBool>);
@@ -164,7 +163,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
 
-    use eframe::egui::{self, Event, Shape};
+    use egui::{Event, Shape};
     use xiaomi_s200::RegistrationStep;
 
     use super::{SetupAttempt, SetupDialog, SetupUpdate};

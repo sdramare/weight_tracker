@@ -1,40 +1,66 @@
+use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::path::Path;
+#[cfg(windows)]
+use std::sync::mpsc::Sender;
+#[cfg(any(windows, test))]
+use std::sync::mpsc::{self, Receiver};
+#[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
-use std::{fmt, fs};
+#[cfg(any(windows, test))]
+use std::{fs, path::PathBuf};
 
+#[cfg(windows)]
 use windows::Devices::Bluetooth::BluetoothLEDevice;
+#[cfg(windows)]
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
     GattCharacteristic, GattCharacteristicProperties,
     GattClientCharacteristicConfigurationDescriptorValue, GattDeviceService,
     GattValueChangedEventArgs, GattWriteOption,
 };
+#[cfg(windows)]
 use windows::Foundation::TypedEventHandler;
+#[cfg(windows)]
 use windows::Storage::Streams::{DataReader, DataWriter};
 
+#[cfg(any(windows, test))]
 use super::registration_crypto::{Registration, RegistrationKeys};
+#[cfg(windows)]
 use super::{
-    Apartment, Scale, check_service_status, open_scale_device, registration_status,
-    setup_characteristic, setup_service,
+    Apartment, check_service_status, open_scale_device, registration_status, setup_characteristic,
+    setup_service,
 };
-use crate::cloud_sign_in::CloudDeviceId;
+#[cfg(any(windows, test))]
 use crate::login_keys::{CONFIRMED_SUFFIX, PENDING_SUFFIX, REJECTED_SUFFIX};
+use crate::{Scale, cloud_sign_in::CloudDeviceId};
 
+#[cfg(windows)]
 const TEST_CERTIFICATE_PATH: &str = "crates/scale/src/setup/s200-local-test.der";
+#[cfg(any(windows, test))]
 const CERTIFICATE_BLOCK: u8 = 0x07;
+#[cfg(any(windows, test))]
 const CERTIFICATE_MTU: u16 = 23;
+#[cfg(any(windows, test))]
 const DEVICE_INFO_OR_ID: u8 = 0x00;
+#[cfg(any(windows, test))]
 const PUBLIC_KEY_BLOCK: u8 = 0x03;
+#[cfg(any(windows, test))]
 const REQUEST_DEVICE_INFO: [u8; 4] = [0xa2, 0, 0, 0];
 const NO_OOB_PROFILE_HEADER: [u8; 4] = [2, 0, 0, 0];
 const EXTENDED_DEVICE_INFO_LENGTH: usize = 24;
+#[cfg(any(windows, test))]
 const START_KEY_EXCHANGE: [u8; 4] = [0x15, 0, 0, 0];
+#[cfg(any(windows, test))]
 const CONFIRM_REGISTRATION: [u8; 4] = [0x13, 0, 0, 0];
+#[cfg(any(windows, test))]
 pub(super) const READY: [u8; 4] = [0, 0, 1, 1];
+#[cfg(any(windows, test))]
 pub(super) const FRAGMENTS_RECEIVED: [u8; 4] = [0, 0, 1, 0];
+#[cfg(any(windows, test))]
 const SINGLE_PACKET_RECEIVED: [u8; 4] = [0, 0, 3, 0];
+#[cfg(any(windows, test))]
 pub(super) const TRANSFER_FAILED: [u8; 4] = [0, 0, 1, 5];
+#[cfg(any(windows, test))]
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A device response to transmitting the test certificate over Standard Auth.
@@ -103,6 +129,7 @@ impl fmt::Display for SetupProfile {
 }
 
 /// Reads the Bluetooth setup profile without starting registration.
+#[cfg(windows)]
 pub fn probe_setup_profile(scale: &Scale) -> io::Result<SetupProfile> {
     SetupLink::open(scale)?.read_profile()
 }
@@ -110,6 +137,7 @@ pub fn probe_setup_profile(scale: &Scale) -> io::Result<SetupProfile> {
 /// Attempts Standard Auth registration of an unregistered ms113 using a local identity.
 ///
 /// Candidate keys are written to the supplied directory before requesting registration.
+#[cfg(windows)]
 pub fn send_setup_test_certificate(
     scale: &Scale,
     credentials_directory: &Path,
@@ -130,12 +158,14 @@ pub fn send_setup_test_certificate(
     Ok(reply)
 }
 
+#[cfg(windows)]
 struct TestCertificateAuthorizer<'a> {
     address: crate::BluetoothAddress,
     credentials_directory: &'a Path,
     certificate: Vec<u8>,
 }
 
+#[cfg(windows)]
 impl RegistrationAuthorizer for TestCertificateAuthorizer<'_> {
     fn authorize_registration(
         self,
@@ -155,6 +185,7 @@ impl RegistrationAuthorizer for TestCertificateAuthorizer<'_> {
     }
 }
 
+#[cfg(any(windows, test))]
 pub(super) fn finish_credentials(
     path: PathBuf,
     reply: SetupCertificateReply,
@@ -184,11 +215,13 @@ pub(super) fn finish_credentials(
     Ok(destination)
 }
 
+#[cfg(any(windows, test))]
 pub(super) struct RegistrationProof {
     pub(super) encrypted_id: Vec<u8>,
     pub(super) certificate: Vec<u8>,
 }
 
+#[cfg(any(windows, test))]
 pub(super) trait RegistrationAuthorizer {
     fn authorize_registration(
         self,
@@ -197,6 +230,7 @@ pub(super) trait RegistrationAuthorizer {
     ) -> io::Result<(RegistrationProof, PathBuf)>;
 }
 
+#[cfg(windows)]
 struct SetupLink {
     _control_subscription: Subscription,
     _auth_subscription: Subscription,
@@ -208,6 +242,7 @@ struct SetupLink {
     _apartment: Apartment,
 }
 
+#[cfg(windows)]
 impl SetupLink {
     fn open(scale: &Scale) -> io::Result<Self> {
         let apartment = Apartment::initialize()?;
@@ -244,6 +279,7 @@ impl SetupLink {
     }
 }
 
+#[cfg(any(windows, test))]
 struct RegistrationTransfer<'a> {
     control: &'a dyn PacketWriter,
     auth: &'a dyn PacketWriter,
@@ -251,6 +287,7 @@ struct RegistrationTransfer<'a> {
     mtu: u16,
 }
 
+#[cfg(any(windows, test))]
 fn read_profile(
     control: &dyn PacketWriter,
     auth: &dyn PacketWriter,
@@ -260,6 +297,7 @@ fn read_profile(
     receive_block(auth, replies, DEVICE_INFO_OR_ID, "device information").map(SetupProfile)
 }
 
+#[cfg(windows)]
 pub(super) fn register_with(
     scale: &Scale,
     authorizer: impl RegistrationAuthorizer,
@@ -270,6 +308,7 @@ pub(super) fn register_with(
     register_over(&link.transfer()?, scale.address(), authorizer)
 }
 
+#[cfg(any(windows, test))]
 fn register_over(
     transfer: &RegistrationTransfer<'_>,
     address: crate::BluetoothAddress,
@@ -343,6 +382,7 @@ fn register_over(
     Ok((reply, credentials))
 }
 
+#[cfg(any(windows, test))]
 fn transmit_block(
     auth: &dyn PacketWriter,
     replies: &Receiver<(Channel, Vec<u8>)>,
@@ -360,6 +400,7 @@ fn transmit_block(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn require_ack(
     replies: &Receiver<(Channel, Vec<u8>)>,
     expected: [u8; 4],
@@ -378,6 +419,7 @@ fn require_ack(
     }
 }
 
+#[cfg(any(windows, test))]
 fn receive_block(
     auth: &dyn PacketWriter,
     replies: &Receiver<(Channel, Vec<u8>)>,
@@ -395,10 +437,12 @@ fn receive_block(
 }
 
 /// Supplies packets for one framed transfer while handling channel-specific replies.
+#[cfg(any(windows, test))]
 pub(super) trait BlockPacketSource {
     fn next_block_packet(&mut self, deadline: Instant, stage: &str) -> io::Result<Vec<u8>>;
 }
 
+#[cfg(any(windows, test))]
 pub(super) fn receive_framed_block(
     characteristic: &dyn PacketWriter,
     expected: Option<u8>,
@@ -441,8 +485,10 @@ pub(super) fn receive_framed_block(
     }
 }
 
+#[cfg(any(windows, test))]
 struct RegistrationPackets<'a>(&'a Receiver<(Channel, Vec<u8>)>);
 
+#[cfg(any(windows, test))]
 impl BlockPacketSource for RegistrationPackets<'_> {
     fn next_block_packet(&mut self, deadline: Instant, stage: &str) -> io::Result<Vec<u8>> {
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
@@ -471,8 +517,10 @@ impl BlockPacketSource for RegistrationPackets<'_> {
     }
 }
 
+#[cfg(any(windows, test))]
 type BlockPackets = ([u8; 6], Vec<Vec<u8>>);
 
+#[cfg(any(windows, test))]
 pub(super) fn block_packets(mtu: u16, kind: u8, payload: &[u8]) -> io::Result<BlockPackets> {
     // The ms113 reported transfer error 0x05 for large certificate fragments at
     // MTU 251. It acknowledged the same DER using at most 20 bytes per write.
@@ -506,10 +554,12 @@ pub(super) fn block_packets(mtu: u16, kind: u8, payload: &[u8]) -> io::Result<Bl
     Ok(([0, 0, 0, kind, low, high], packets))
 }
 
+#[cfg(any(windows, test))]
 pub(super) trait PacketWriter {
     fn write(&self, packet: &[u8]) -> io::Result<()>;
 }
 
+#[cfg(windows)]
 impl PacketWriter for GattCharacteristic {
     fn write(&self, packet: &[u8]) -> io::Result<()> {
         let writer = DataWriter::new()?;
@@ -525,12 +575,14 @@ impl PacketWriter for GattCharacteristic {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(windows, test))]
 pub(super) enum Channel {
     Control,
     Auth,
     Data,
 }
 
+#[cfg(any(windows, test))]
 enum Response {
     Control(SetupCertificateReply),
     Acknowledged,
@@ -538,6 +590,7 @@ enum Response {
     TimedOut,
 }
 
+#[cfg(any(windows, test))]
 fn await_reply(
     replies: &Receiver<(Channel, Vec<u8>)>,
     acknowledgment: Option<[u8; 4]>,
@@ -569,12 +622,14 @@ fn await_reply(
     Response::TimedOut
 }
 
+#[cfg(any(windows, test))]
 fn transfer_error(stage: &str) -> io::Error {
     io::Error::other(format!(
         "the scale reported transfer error 0x05 for {stage}"
     ))
 }
 
+#[cfg(any(windows, test))]
 fn registration_reply(packet: &[u8]) -> Option<SetupCertificateReply> {
     match packet {
         [0x11, 0, 0, 0] => Some(SetupCertificateReply::RegistrationSucceeded),
@@ -584,11 +639,13 @@ fn registration_reply(packet: &[u8]) -> Option<SetupCertificateReply> {
     }
 }
 
+#[cfg(windows)]
 pub(super) struct Subscription {
     characteristic: GattCharacteristic,
     token: i64,
 }
 
+#[cfg(windows)]
 impl Subscription {
     pub(super) fn start(
         characteristic: &GattCharacteristic,
@@ -629,10 +686,21 @@ impl Subscription {
     }
 }
 
+#[cfg(windows)]
 impl Drop for Subscription {
     fn drop(&mut self) {
         let _ = self.characteristic.RemoveValueChanged(self.token);
     }
+}
+
+#[cfg(not(windows))]
+pub fn probe_setup_profile(_: &Scale) -> io::Result<SetupProfile> {
+    Err(crate::bluetooth_unavailable())
+}
+
+#[cfg(not(windows))]
+pub fn send_setup_test_certificate(_: &Scale, _: &Path) -> io::Result<SetupCertificateReply> {
+    Err(crate::bluetooth_unavailable())
 }
 
 #[cfg(feature = "test-fixtures")]

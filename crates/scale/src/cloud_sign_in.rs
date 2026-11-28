@@ -3,17 +3,18 @@ use std::io;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde_json::{Map, Number, Value};
 use url::Url;
-use windows::Data::Json::{JsonObject, JsonValue};
-use windows::core::HSTRING;
 
-use super::{Apartment, check_cancellation};
+use super::check_cancellation;
 
 mod cloud_api;
 mod https;
 mod registration_api;
 
-pub(crate) use registration_api::{CloudAuthorization, CloudDeviceId};
+#[cfg(any(windows, test))]
+pub(crate) use registration_api::CloudAuthorization;
+pub(crate) use registration_api::CloudDeviceId;
 
 const ACCOUNT_BOOTSTRAP: &str = "https://account.xiaomi.com/longPolling/loginUrl";
 const SESSION_CALLBACK: &str = "https://sts.api.io.mi.com/sts";
@@ -56,35 +57,29 @@ pub fn verify_xiaomi_cloud_europe(interaction: &mut dyn ScaleSetupInteraction) -
 pub(crate) struct EuropeSession {
     client: Box<dyn https::RequestSession>,
     account: CloudAccount,
-    _apartment: Apartment,
 }
 
 impl EuropeSession {
     pub(crate) fn sign_in(interaction: &mut dyn ScaleSetupInteraction) -> io::Result<Self> {
         check_cancellation(interaction)?;
-        let apartment = Apartment::initialize()?;
         let client = Box::new(https::Session::new()?);
-        Self::authorize(client, interaction, apartment)
+        Self::authorize(client, interaction)
     }
 
     fn authorize(
         client: Box<dyn https::RequestSession>,
         interaction: &mut dyn ScaleSetupInteraction,
-        apartment: Apartment,
     ) -> io::Result<Self> {
         let account = sign_in(client.as_ref(), interaction)?;
-        Ok(Self {
-            client,
-            account,
-            _apartment: apartment,
-        })
+        Ok(Self { client, account })
     }
 
     pub(crate) fn verify_device_count(&self) -> io::Result<()> {
         cloud_api::verify_device_count(self.client.as_ref(), &self.account)
     }
 
-    fn request(&self, path: &str, data: &str) -> io::Result<JsonValue> {
+    #[cfg(any(windows, test))]
+    fn request(&self, path: &str, data: &str) -> io::Result<Value> {
         cloud_api::signed_request(self.client.as_ref(), &self.account, path, data)
     }
 }
@@ -139,18 +134,17 @@ impl Challenge {
     fn parse(body: &[u8]) -> io::Result<Self> {
         let json = xiaomi_json(body)?;
         let browser = json
-            .GetNamedString(&HSTRING::from("loginUrl"))
-            .map_err(|_| {
+            .get("loginUrl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
                 invalid_response("Xiaomi's response did not include a browser sign-in link")
             })?;
-        let poll = json.GetNamedString(&HSTRING::from("lp")).map_err(|_| {
+        let poll = json.get("lp").and_then(Value::as_str).ok_or_else(|| {
             invalid_response("Xiaomi's response did not include a sign-in polling link")
         })?;
-        let seconds = json
-            .GetNamedNumber(&HSTRING::from("timeout"))
-            .map_err(|_| {
-                invalid_response("Xiaomi's response did not include a sign-in lifetime")
-            })?;
+        let seconds = json.get("timeout").and_then(Value::as_f64).ok_or_else(|| {
+            invalid_response("Xiaomi's response did not include a sign-in lifetime")
+        })?;
         if !seconds.is_finite() || seconds < 1.0 {
             return Err(invalid_response(
                 "Xiaomi returned an invalid sign-in lifetime",
@@ -158,8 +152,8 @@ impl Challenge {
         }
         let valid_for = Duration::from_secs_f64(seconds.min(MAX_SIGN_IN_WINDOW.as_secs_f64()));
         Ok(Self {
-            link: XiaomiSignInLink(account_url(&browser.to_string_lossy())?),
-            poll: account_url(&poll.to_string_lossy())?,
+            link: XiaomiSignInLink(account_url(browser)?),
+            poll: account_url(poll)?,
             valid_for,
         })
     }
@@ -200,41 +194,53 @@ fn wait_for_authorization(
 fn authorized_callback(body: &[u8]) -> io::Result<Authorization> {
     let json = xiaomi_json(body)?;
     let security = json
-        .GetNamedString(&HSTRING::from("ssecurity"))
-        .map_err(|_| invalid_response("Xiaomi did not grant the requested smart-home session"))?;
+        .get("ssecurity")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_response("Xiaomi did not grant the requested smart-home session"))?;
     if security.is_empty() {
         return Err(invalid_response("Xiaomi returned empty session material"));
     }
     let value = json
-        .GetNamedString(&HSTRING::from("location"))
-        .map_err(|_| invalid_response("Xiaomi did not provide the session callback"))?;
-    let url = secure_url(&value.to_string_lossy())?;
+        .get("location")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_response("Xiaomi did not provide the session callback"))?;
+    let url = secure_url(value)?;
     if url.host_str() != Some("sts.api.io.mi.com") || url.path() != "/sts" {
         return Err(invalid_response(
             "Xiaomi returned an unexpected session callback",
         ));
     }
-    let user_id_key = HSTRING::from("userId");
     let user_id = json
-        .GetNamedString(&user_id_key)
-        .or_else(|_| json.GetNamedValue(&user_id_key)?.Stringify())
-        .ok()
-        .map(|value| value.to_string_lossy())
+        .get("userId")
+        .and_then(|value| match value {
+            Value::String(id) => Some(id.clone()),
+            Value::Number(id) => integer_text(id),
+            _ => None,
+        })
         .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
     Ok(Authorization {
         callback: url,
         user_id,
-        security: security.to_string_lossy(),
+        security: security.to_owned(),
     })
 }
 
-fn xiaomi_json(body: &[u8]) -> io::Result<JsonObject> {
+fn xiaomi_json(body: &[u8]) -> io::Result<Map<String, Value>> {
     let text = std::str::from_utf8(body)
         .map_err(|_| invalid_response("Xiaomi returned a response with invalid text encoding"))?;
     let text = text.trim_start_matches('\u{feff}').trim_start();
     let text = text.strip_prefix("&&&START&&&").unwrap_or(text).trim();
-    JsonObject::Parse(&HSTRING::from(text))
+    serde_json::from_str(text)
         .map_err(|_| invalid_response("Xiaomi returned an unexpected sign-in response"))
+}
+
+fn integer_text(number: &Number) -> Option<String> {
+    if !number.is_f64() {
+        return Some(number.to_string());
+    }
+    // WinRT's JSON parser normalized integral decimals and exponents.
+    let value = number.as_f64()?;
+    (value.fract() == 0.0).then(|| format!("{value:.0}"))
 }
 
 fn bootstrap_url() -> io::Result<Url> {
@@ -409,7 +415,6 @@ pub(crate) mod tests {
                 security: "dGVzdA==".into(),
                 service_token: "session-fixture".into(),
             },
-            _apartment: Apartment::initialize().unwrap(),
         }
     }
 
@@ -453,12 +458,7 @@ pub(crate) mod tests {
                 br#"{"code":0,"result":{"list":[{"did":"blt.1.fixture"}]}}"#,
             ),
         ]);
-        let session = EuropeSession::authorize(
-            Box::new(script),
-            &mut browser,
-            Apartment::initialize().unwrap(),
-        )
-        .unwrap();
+        let session = EuropeSession::authorize(Box::new(script), &mut browser).unwrap();
         assert_eq!(
             browser.links,
             ["https://ak.account.xiaomi.com/longPolling/login?ticket=test"]
@@ -478,7 +478,6 @@ pub(crate) mod tests {
 
     #[test]
     fn distinguishes_bootstrap_polling_callback_and_cancellation_errors() {
-        let _apartment = Apartment::initialize().unwrap();
         for (mut browser, exchanges, kind, expected) in [
             (
                 Browser::default(),
@@ -535,7 +534,6 @@ pub(crate) mod tests {
 
     #[test]
     fn parses_xiaomi_browser_challenge() {
-        let _apartment = Apartment::initialize().unwrap();
         let challenge = Challenge::parse(CHALLENGE).unwrap();
         assert_eq!(challenge.valid_for.as_secs(), 60);
         assert_eq!(challenge.poll.host_str(), Some("lp.account.xiaomi.com"));
@@ -543,7 +541,6 @@ pub(crate) mod tests {
 
     #[test]
     fn validates_the_destinations_of_sign_in_and_session_urls() {
-        let _apartment = Apartment::initialize().unwrap();
         assert!(account_url("https://untrusted.test/account.xiaomi.com").is_err());
         assert!(account_url("http://account.xiaomi.com/").is_err());
         assert!(
@@ -560,8 +557,12 @@ pub(crate) mod tests {
 
     #[test]
     fn reads_an_account_id_as_a_string_or_number() {
-        let _apartment = Apartment::initialize().unwrap();
-        for user_id in ["1234567890", r#""1234567890""#] {
+        for user_id in [
+            "1234567890",
+            "1234567890.0",
+            "1.23456789e9",
+            r#""1234567890""#,
+        ] {
             let response = format!(
                 r#"{{"ssecurity":"test","userId":{user_id},"location":"https://sts.api.io.mi.com/sts"}}"#
             );

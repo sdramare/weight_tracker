@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
-use eframe::egui::{self, Color32};
+use egui::Color32;
 use egui_plot::{
     GridInput, GridMark, HoverPosition, Legend, Line, LineStyle, Plot, PlotPoints, Points,
 };
@@ -215,7 +215,7 @@ fn date_label(value: f64, format: &str) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::{Datelike, Local, NaiveDate, TimeZone};
-    use eframe::egui::{self, Shape};
+    use egui::Shape;
     use egui_plot::{GridInput, GridMark, HoverPosition, PlotPoint};
     use xiaomi_s200::Weight;
 

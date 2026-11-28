@@ -1,22 +1,40 @@
+#[cfg(any(windows, test))]
 use std::collections::HashMap;
+#[cfg(any(windows, test))]
 use std::io;
 use std::ops::ControlFlow;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::sync::mpsc::{self, Sender};
+#[cfg(any(windows, test))]
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+#[cfg(any(windows, test))]
+use std::time::Duration;
+use std::time::Instant;
 
+#[cfg(windows)]
 use windows::Devices::Bluetooth::Advertisement::{
     BluetoothLEAdvertisement, BluetoothLEAdvertisementReceivedEventArgs,
     BluetoothLEAdvertisementType, BluetoothLEAdvertisementWatcher,
     BluetoothLEAdvertisementWatcherStoppedEventArgs, BluetoothLEScanningMode,
 };
+#[cfg(windows)]
 use windows::Devices::Bluetooth::BluetoothAddressType;
+#[cfg(windows)]
 use windows::Foundation::TypedEventHandler;
+#[cfg(windows)]
 use windows::Storage::Streams::DataReader;
 
-use super::{BluetoothAddress, Scale, ScaleSetupInfo, SignalStrength, Weight, WeightDecoder};
+#[cfg(windows)]
+use super::WeightDecoder;
+#[cfg(any(windows, test))]
+use super::{AddressKind, BluetoothAddress, ScaleSetupInfo, SignalStrength};
+use super::{Scale, Weight};
 
+#[cfg(any(windows, test))]
 const STOP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(any(windows, test))]
 const CANDIDATE_LIFETIME: Duration = Duration::from_secs(30);
+#[cfg(windows)]
 const XIAOMI_COMPANY_ID: u16 = 0x038f;
 
 /// Receives Bluetooth discoveries and controls how long the scan stays active.
@@ -41,6 +59,7 @@ pub trait ScaleScanObserver {
     }
 }
 
+#[cfg(any(windows, test))]
 struct Advertisement {
     address: BluetoothAddress,
     received_at: Instant,
@@ -48,23 +67,27 @@ struct Advertisement {
     name: Option<String>,
     signal_strength: SignalStrength,
     connectable: bool,
-    address_type: Option<BluetoothAddressType>,
+    address_type: Option<AddressKind>,
     weight: Option<Weight>,
     setup_info: Option<ScaleSetupInfo>,
 }
 
+#[cfg(any(windows, test))]
 struct Candidate {
     is_s200: bool,
     scale: Scale,
     last_seen: Instant,
 }
 
+#[cfg(any(windows, test))]
 enum ScanWindow {
     Timed(Instant),
     Continuous,
 }
 
+#[cfg(any(windows, test))]
 impl ScanWindow {
+    #[cfg(windows)]
     fn scanning_mode(&self) -> BluetoothLEScanningMode {
         match self {
             Self::Timed(_) => BluetoothLEScanningMode::Active,
@@ -82,17 +105,20 @@ impl ScanWindow {
     }
 }
 
+#[cfg(any(windows, test))]
 enum Event {
     Advertisement(Advertisement),
     Stopped(i32),
 }
 
+#[cfg(windows)]
 struct Watcher {
     inner: BluetoothLEAdvertisementWatcher,
     received: Option<i64>,
     stopped: Option<i64>,
 }
 
+#[cfg(windows)]
 impl Watcher {
     fn start(
         sender: Sender<Event>,
@@ -143,6 +169,7 @@ impl Watcher {
     }
 }
 
+#[cfg(windows)]
 impl Drop for Watcher {
     fn drop(&mut self) {
         if let Some(token) = self.received {
@@ -154,6 +181,7 @@ impl Drop for Watcher {
     }
 }
 
+#[cfg(windows)]
 pub(super) fn discover(
     duration: Duration,
     decoder: Option<WeightDecoder>,
@@ -165,6 +193,7 @@ pub(super) fn discover(
     run_scan(ScanWindow::Timed(deadline), decoder, observer)
 }
 
+#[cfg(windows)]
 pub(super) fn watch(
     decoder: Option<WeightDecoder>,
     observer: &mut dyn ScaleScanObserver,
@@ -172,6 +201,7 @@ pub(super) fn watch(
     run_scan(ScanWindow::Continuous, decoder, observer)
 }
 
+#[cfg(windows)]
 fn run_scan(
     window: ScanWindow,
     decoder: Option<WeightDecoder>,
@@ -183,6 +213,7 @@ fn run_scan(
     result.and(watcher.stop())
 }
 
+#[cfg(any(windows, test))]
 fn wait_for_scales(
     window: ScanWindow,
     receiver: Receiver<Event>,
@@ -256,6 +287,7 @@ fn wait_for_scales(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 impl Candidate {
     fn update(&mut self, advertisement: Advertisement) -> bool {
         let scale = &mut self.scale;
@@ -288,6 +320,7 @@ impl Candidate {
     }
 }
 
+#[cfg(any(windows, test))]
 fn stopped_error(code: i32) -> io::Error {
     let message = match code {
         0 => "Windows stopped the scan early",
@@ -302,6 +335,7 @@ fn stopped_error(code: i32) -> io::Error {
     io::Error::other(message)
 }
 
+#[cfg(windows)]
 fn read_advertisement(
     args: &BluetoothLEAdvertisementReceivedEventArgs,
     decoder: Option<&WeightDecoder>,
@@ -333,12 +367,11 @@ fn read_advertisement(
         Ok(BluetoothLEAdvertisementType::Extended) => args.IsConnectable().unwrap_or(false),
         _ => false,
     };
-    let address_type = args.BluetoothAddressType().ok().filter(|kind| {
-        matches!(
-            *kind,
-            BluetoothAddressType::Public | BluetoothAddressType::Random
-        )
-    });
+    let address_type = match args.BluetoothAddressType() {
+        Ok(BluetoothAddressType::Public) => Some(AddressKind::Public),
+        Ok(BluetoothAddressType::Random) => Some(AddressKind::Random),
+        _ => None,
+    };
 
     Ok(Some(Advertisement {
         address,
@@ -353,6 +386,7 @@ fn read_advertisement(
     }))
 }
 
+#[cfg(windows)]
 #[derive(Default)]
 struct AdvertisementPayload {
     name: Option<String>,
@@ -361,6 +395,7 @@ struct AdvertisementPayload {
     weight: Option<Weight>,
 }
 
+#[cfg(windows)]
 fn inspect_payload(
     payload: &BluetoothLEAdvertisement,
     address: BluetoothAddress,
@@ -386,6 +421,7 @@ fn inspect_payload(
     }
 }
 
+#[cfg(windows)]
 fn inspect_manufacturer_data(payload: &BluetoothLEAdvertisement) -> Option<ScaleSetupInfo> {
     // Xiaomi also sends MiBeacon without the FE95 prefix under its company ID.
     let sections = payload
@@ -408,6 +444,7 @@ fn inspect_manufacturer_data(payload: &BluetoothLEAdvertisement) -> Option<Scale
     None
 }
 
+#[cfg(windows)]
 fn inspect_service_data(
     payload: &BluetoothLEAdvertisement,
     address: BluetoothAddress,
@@ -451,25 +488,27 @@ fn inspect_service_data(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    #[cfg(windows)]
     use windows::Devices::Bluetooth::Advertisement::{
         BluetoothLEAdvertisementDataSection, BluetoothLEManufacturerData,
     };
+    #[cfg(windows)]
     use windows::Storage::Streams::{DataWriter, IBuffer};
+    #[cfg(windows)]
     use windows::core::HSTRING;
 
-    use super::{
-        Advertisement, BluetoothAddress, BluetoothAddressType, BluetoothLEAdvertisement,
-        BluetoothLEScanningMode, ControlFlow, Duration, Event, Instant, Scale, ScaleScanObserver,
-        ScanWindow, SignalStrength, Weight, WeightDecoder, XIAOMI_COMPANY_ID, inspect_payload,
-        mpsc, wait_for_scales,
-    };
+    use super::*;
 
+    #[cfg(windows)]
     fn buffer(bytes: &[u8]) -> IBuffer {
         let writer = DataWriter::new().unwrap();
         writer.WriteBytes(bytes).unwrap();
         writer.DetachBuffer().unwrap()
     }
 
+    #[cfg(windows)]
     #[test]
     fn inspects_real_winrt_advertisement_sections_without_a_radio() {
         let _apartment = crate::Apartment::initialize().unwrap();
@@ -559,6 +598,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn only_timed_discovery_requests_scan_responses() {
         assert_eq!(
@@ -644,7 +684,7 @@ mod tests {
     #[test]
     fn reports_each_scale_and_combines_advertisements_by_address() {
         let (sender, receiver) = mpsc::channel();
-        let address_type = Some(BluetoothAddressType::Public);
+        let address_type = Some(AddressKind::Public);
         for (address, is_s200, connectable, weight) in [
             (12, true, false, None),
             (34, false, true, None),

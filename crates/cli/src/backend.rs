@@ -59,8 +59,10 @@ pub(super) trait ScaleOperations {
     ) -> io::Result<SetupCertificateReply>;
 }
 
+#[cfg(windows)]
 pub(super) struct WindowsScale;
 
+#[cfg(windows)]
 impl ScaleOperations for WindowsScale {
     fn find_scale(&self, duration: Duration, selection: ScaleSelection) -> io::Result<Scale> {
         match selection {

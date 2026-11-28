@@ -120,11 +120,15 @@ cargo test --locked --workspace
 
 The build script runs Clippy across all workspace targets before compiling the CLI and desktop app.
 
+Run `cargo test --locked --workspace` on Linux to exercise the CLI commands, headless egui views, SQLite history, Bluetooth packet handling, and Xiaomi request and response logic with fixtures. Linux builds need a C compiler, OpenSSL development headers, and `pkg-config`.
+
+GitHub Actions runs the full workspace on Linux and Windows. Running the desktop app and connecting to a physical scale require Windows.
+
 ## Workspace
 
 | Package | Role |
 | --- | --- |
-| [`xiaomi-s200`](crates/scale) | Shared Windows BLE discovery and GATT service inspection |
+| [`xiaomi-s200`](crates/scale) | Shared scale protocol and cloud logic with Windows BLE discovery and GATT access |
 | [`blt_unlock`](crates/cli) | Terminal connection tool |
 | [`blt_unlock_gui`](crates/gui) | egui desktop discovery app |
 

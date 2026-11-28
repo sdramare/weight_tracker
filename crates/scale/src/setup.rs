@@ -1,6 +1,7 @@
 mod certificate_transfer;
 mod connected_weight;
 mod registration;
+#[cfg(any(windows, test))]
 mod registration_crypto;
 
 use std::collections::HashMap;
@@ -8,13 +9,14 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 use std::{fmt, io};
 
+#[cfg(windows)]
 use windows::Devices::Bluetooth::GenericAttributeProfile::{GattCharacteristic, GattDeviceService};
+#[cfg(windows)]
 use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice, BluetoothUuidHelper};
 
-use super::{
-    Apartment, Scale, ScaleScanObserver, ScaleSetupInteraction, Weight, check_service_status,
-    discover_scales, open_scale_device,
-};
+#[cfg(windows)]
+use super::{Apartment, check_service_status, open_scale_device};
+use super::{Scale, ScaleScanObserver, ScaleSetupInteraction, Weight, discover_scales};
 
 pub use certificate_transfer::{
     SetupCertificateReply, SetupProfile, probe_setup_profile, send_setup_test_certificate,
@@ -155,6 +157,7 @@ impl SetupBlocker {
 }
 
 /// Connects to the scale and checks for the Xiaomi Standard Auth characteristic.
+#[cfg(windows)]
 pub fn probe_setup_service(scale: &Scale) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
     let device = open_scale_device(scale)?;
@@ -163,6 +166,12 @@ pub fn probe_setup_service(scale: &Scale) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
+pub fn probe_setup_service(_: &Scale) -> io::Result<()> {
+    Err(crate::bluetooth_unavailable())
+}
+
+#[cfg(windows)]
 fn setup_service(device: &BluetoothLEDevice) -> io::Result<GattDeviceService> {
     let service_uuid = BluetoothUuidHelper::FromShortId(0xfe95)?;
     let result = device
@@ -179,6 +188,7 @@ fn setup_service(device: &BluetoothLEDevice) -> io::Result<GattDeviceService> {
     Ok(services.GetAt(0)?)
 }
 
+#[cfg(windows)]
 fn setup_characteristic(
     service: &GattDeviceService,
     short_uuid: u32,

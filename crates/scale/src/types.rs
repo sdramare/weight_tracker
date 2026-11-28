@@ -1,7 +1,5 @@
 use std::fmt;
 
-use windows::core::GUID;
-
 /// A scale's Bluetooth device address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BluetoothAddress(pub(super) u64);
@@ -62,21 +60,25 @@ pub enum WeightReading {
 
 /// The 128-bit UUID of a Bluetooth GATT service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct GattServiceUuid(pub(super) GUID);
+pub struct GattServiceUuid(pub(super) u128);
 
 impl fmt::Display for GattServiceUuid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
+        let [a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q] = self.0.to_be_bytes();
+        write!(
+            f,
+            "{a:02X}{b:02X}{c:02X}{d:02X}-{e:02X}{g:02X}-{h:02X}{i:02X}-{j:02X}{k:02X}-{l:02X}{m:02X}{n:02X}{o:02X}{p:02X}{q:02X}"
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BluetoothAddress, GUID, GattServiceUuid, ScaleName, SignalStrength};
+    use super::{BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength};
 
     #[test]
     fn displays_bluetooth_values_in_the_existing_formats() {
-        let service = GattServiceUuid(GUID::from_u128(0x0000_fe95_0000_1000_8000_0080_5f9b_34fb));
+        let service = GattServiceUuid(0x0000_fe95_0000_1000_8000_0080_5f9b_34fb);
         assert_eq!(service.to_string(), "0000FE95-0000-1000-8000-00805F9B34FB");
         assert_eq!(
             BluetoothAddress(0x1234_5678_9abc).to_string(),

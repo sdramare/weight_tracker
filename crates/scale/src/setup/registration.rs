@@ -3,14 +3,21 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(windows)]
+use super::certificate_transfer::register_with;
+#[cfg(any(windows, test))]
 use super::certificate_transfer::{
     RegistrationAuthorizer, RegistrationProof, SetupCertificateReply, finish_credentials,
-    register_with,
 };
+#[cfg(windows)]
 use super::find_registration_scale_with;
+#[cfg(any(windows, test))]
 use super::registration_crypto::Registration;
+#[cfg(any(windows, test))]
+use crate::Scale;
+#[cfg(any(windows, test))]
 use crate::cloud_sign_in::{CloudDeviceId, EuropeSession};
-use crate::{BluetoothAddress, Scale, ScaleSetupInteraction, check_cancellation};
+use crate::{BluetoothAddress, ScaleSetupInteraction, check_cancellation};
 
 /// A stage of cloud-backed S200 registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +80,7 @@ impl RegisteredScale {
 ///
 /// Cancellation is checked through Bluetooth key exchange. Once cloud requests
 /// begin for the selected scale, registration runs to completion.
+#[cfg(windows)]
 pub fn register_scale_europe(
     scan_time: Duration,
     credentials_directory: &Path,
@@ -86,6 +94,17 @@ pub fn register_scale_europe(
     )
 }
 
+#[cfg(not(windows))]
+pub fn register_scale_europe(
+    _: Duration,
+    _: &Path,
+    observer: &mut dyn RegistrationObserver,
+) -> io::Result<RegisteredScale> {
+    check_cancellation(observer)?;
+    Err(crate::bluetooth_unavailable())
+}
+
+#[cfg(any(windows, test))]
 trait RegistrationServices {
     fn sign_in(&self, observer: &mut dyn RegistrationObserver) -> io::Result<EuropeSession>;
     fn find_scale(
@@ -100,8 +119,10 @@ trait RegistrationServices {
     ) -> io::Result<(SetupCertificateReply, PathBuf)>;
 }
 
+#[cfg(windows)]
 struct SystemRegistration;
 
+#[cfg(windows)]
 impl RegistrationServices for SystemRegistration {
     fn sign_in(&self, observer: &mut dyn RegistrationObserver) -> io::Result<EuropeSession> {
         EuropeSession::sign_in(observer)
@@ -124,6 +145,7 @@ impl RegistrationServices for SystemRegistration {
     }
 }
 
+#[cfg(any(windows, test))]
 fn run_registration(
     scan_time: Duration,
     credentials_directory: &Path,
@@ -204,6 +226,7 @@ fn run_registration(
     })
 }
 
+#[cfg(any(windows, test))]
 struct XiaomiRegistrationAuthorizer<'a> {
     session: &'a EuropeSession,
     address: BluetoothAddress,
@@ -212,6 +235,7 @@ struct XiaomiRegistrationAuthorizer<'a> {
     previous_device: &'a mut Option<(CloudDeviceId, bool)>,
 }
 
+#[cfg(any(windows, test))]
 impl RegistrationAuthorizer for XiaomiRegistrationAuthorizer<'_> {
     fn authorize_registration(
         self,
@@ -264,6 +288,7 @@ impl RegistrationAuthorizer for XiaomiRegistrationAuthorizer<'_> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn complete_step<T>(
     observer: &mut dyn RegistrationObserver,
     step: RegistrationStep,
@@ -320,7 +345,8 @@ mod tests {
     struct Fixture(SetupCertificateReply);
 
     impl RegistrationServices for Fixture {
-        fn sign_in(&self, _: &mut dyn RegistrationObserver) -> io::Result<EuropeSession> {
+        fn sign_in(&self, observer: &mut dyn RegistrationObserver) -> io::Result<EuropeSession> {
+            check_cancellation(observer)?;
             let certificate = format!(
                 r#"{{"code":0,"result":{{"success":true,"cloud_cert":"MA","cloud_sign":"{}","utc":1234}}}}"#,
                 Base64::encode_string(&[3; 64]),
@@ -497,8 +523,12 @@ mod tests {
         }
 
         let mut observer = CancelledSetup::default();
-        let result =
-            register_scale_europe(Duration::from_secs(30), Path::new("unused"), &mut observer);
+        let result = run_registration(
+            Duration::from_secs(30),
+            Path::new("unused"),
+            &mut observer,
+            &Fixture(SetupCertificateReply::RegistrationSucceeded),
+        );
         assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::Interrupted));
         assert!(!observer.sign_in_presented);
         assert_eq!(observer.stages, [RegistrationStep::BrowserSignIn]);

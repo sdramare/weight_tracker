@@ -508,7 +508,7 @@
 
     <section class="panel" aria-labelledby="cloud-heading">
       <h2 id="cloud-heading">Xiaomi browser session and Europe API</h2>
-      <p>The CLI sends Xiaomi requests through <code>reqwest</code> using Windows’ native TLS. The client allows HTTPS, disables automatic redirects and retries, and limits response bodies to 64 KiB. Browser sign-in requests share an in-memory cookie jar. Signed API requests send only the cookies listed below.</p>
+      <p>The CLI sends Xiaomi requests through <code>reqwest</code> using Windows’ native TLS. The client allows HTTPS, disables automatic redirects and retries, and limits response bodies to 64 KiB. Browser sign-in requests share an in-memory cookie jar. Signed API requests send only the cookies listed below. RustCrypto implements the legacy RC4 transformation inside Xiaomi’s request format, and HTTPS protects the transport.</p>
       <h3>Get the smart-home session</h3>
       <ol class="steps">
         <li>GET <code>https://account.xiaomi.com/longPolling/loginUrl</code> with <code>sid=xiaomiio</code>, callback <code>https://sts.api.io.mi.com/sts</code>, and current epoch milliseconds in <code>_dc</code>. Require HTTP 200, strip the optional <code>&amp;&amp;&amp;START&amp;&amp;&amp;</code> prefix, and parse <code>loginUrl</code>, <code>lp</code>, and <code>timeout</code>. Both returned URLs must use HTTPS on port 443 and belong to <code>account.xiaomi.com</code>, <code>account.mi.com</code>, or their subdomains.</li>
@@ -607,6 +607,7 @@
       </div>
       <p><code>ScaleMonitor::run</code> checks for queued registration before listening for weight. <code>run_setup</code> reloads credentials after registration, while <code>listen_for_weight</code> starts the scan and handles retries. <code>ScaleBackend</code> supplies Windows operations so the tests can replay discoveries, setup results, and readings.</p>
       <p>Inside the library, <code>RegistrationAuthorizer</code> prepares the cloud or test proof. <code>BlockPacketSource</code> supplies notifications to the shared packet reader, and <code>PacketWriter</code> sends commands and acknowledgments. Tests replay valid and invalid transfers without a physical scale.</p>
+      <p>Run <code>cargo test --locked --workspace</code> on Linux or Windows. Both exercise the CLI, headless desktop views, and protocol fixtures. Windows also runs the WinRT advertisement and GATT status tests.</p>
       <p class="source"><a href="../crates/gui/src/desktop.rs">Desktop implementations</a> · <a href="../crates/cli/src/main.rs">Terminal implementations</a> · <a href="../crates/scale/src/setup/certificate_transfer.rs">Registration and packet reader traits</a></p>
     </section>
 

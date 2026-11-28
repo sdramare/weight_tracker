@@ -1,37 +1,66 @@
 use std::io;
 use std::ops::ControlFlow;
-use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
+#[cfg(any(windows, test))]
+use std::sync::mpsc;
+#[cfg(any(windows, test))]
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
+#[cfg(any(windows, test))]
+use std::time::Instant;
 
+#[cfg(any(windows, test))]
 use aes::Aes128;
+#[cfg(any(windows, test))]
 use ccm::Ccm;
+#[cfg(any(windows, test))]
 use ccm::aead::{
     AeadInOut, KeyInit,
     consts::{U4, U12},
 };
+#[cfg(any(windows, test))]
 use hkdf::Hkdf;
+#[cfg(any(windows, test))]
 use hmac::{Hmac, Mac};
+#[cfg(any(windows, test))]
 use sha2::Sha256;
+#[cfg(windows)]
 use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothLEDevice};
 
+#[cfg(any(windows, test))]
 use super::certificate_transfer::{
-    BlockPacketSource, Channel, FRAGMENTS_RECEIVED, PacketWriter, READY, Subscription,
-    TRANSFER_FAILED, block_packets, receive_framed_block,
+    BlockPacketSource, Channel, FRAGMENTS_RECEIVED, PacketWriter, READY, TRANSFER_FAILED,
+    block_packets, receive_framed_block,
 };
-use super::{setup_characteristic, setup_service};
-use crate::{Apartment, Scale, ScaleLoginToken, Weight, WeightReading, open_scale_device};
+#[cfg(windows)]
+use super::{certificate_transfer::Subscription, setup_characteristic, setup_service};
+#[cfg(any(windows, test))]
+use crate::Weight;
+#[cfg(windows)]
+use crate::{Apartment, open_scale_device};
+use crate::{Scale, ScaleLoginToken, WeightReading};
 
+#[cfg(any(windows, test))]
 const LOGIN: [u8; 4] = [0x24, 0, 0, 0];
+#[cfg(any(windows, test))]
 const APP_RANDOM: u8 = 0x0b;
+#[cfg(any(windows, test))]
 const APP_PROOF: u8 = 0x0a;
+#[cfg(any(windows, test))]
 const SCALE_RANDOM: u8 = 0x0d;
+#[cfg(any(windows, test))]
 const SCALE_PROOF: u8 = 0x0c;
+#[cfg(any(windows, test))]
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(any(windows, test))]
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(any(windows, test))]
 const CONNECTION_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
+#[cfg(any(windows, test))]
 type Notification = (Channel, Vec<u8>);
+#[cfg(any(windows, test))]
 type WeightCipher = Ccm<Aes128, U4, U12>;
+#[cfg(any(windows, test))]
 type HmacSha256 = Hmac<Sha256>;
 
 /// A successful Bluetooth login or a measurement from the authenticated scale.
@@ -81,6 +110,26 @@ fn read_connected_weights(
     if !observer.should_read_weight() {
         return Ok(());
     }
+    read_from_device(scale, token, measurement_time, observer)
+}
+
+#[cfg(not(windows))]
+fn read_from_device(
+    _: &Scale,
+    _: &ScaleLoginToken,
+    _: Option<Duration>,
+    _: &mut dyn WeightSessionObserver,
+) -> io::Result<()> {
+    Err(crate::bluetooth_unavailable())
+}
+
+#[cfg(windows)]
+fn read_from_device(
+    scale: &Scale,
+    token: &ScaleLoginToken,
+    measurement_time: Option<Duration>,
+    observer: &mut dyn WeightSessionObserver,
+) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
     let device = open_scale_device(scale)?;
     let service = setup_service(&device)?;
@@ -104,12 +153,14 @@ fn read_connected_weights(
     .read(keys, measurement_time, observer)
 }
 
+#[cfg(any(windows, test))]
 struct WeightStream<'a> {
     packets: &'a Receiver<Notification>,
     writer: &'a dyn PacketWriter,
     connection: &'a dyn ConnectionState,
 }
 
+#[cfg(any(windows, test))]
 impl WeightStream<'_> {
     fn read(
         &self,
@@ -188,30 +239,36 @@ impl WeightStream<'_> {
     }
 }
 
+#[cfg(any(windows, test))]
 trait ConnectionState {
     fn is_connected(&self) -> io::Result<bool>;
 }
 
+#[cfg(windows)]
 impl ConnectionState for BluetoothLEDevice {
     fn is_connected(&self) -> io::Result<bool> {
         Ok(self.ConnectionStatus()? != BluetoothConnectionStatus::Disconnected)
     }
 }
 
+#[cfg(any(windows, test))]
 struct SettledWeightPackets<'a>(&'a Receiver<Notification>);
 
+#[cfg(any(windows, test))]
 impl BlockPacketSource for SettledWeightPackets<'_> {
     fn next_block_packet(&mut self, deadline: Instant, _: &str) -> io::Result<Vec<u8>> {
         read_notification(self.0, deadline, "a settled weight").map(|(_, packet)| packet)
     }
 }
 
+#[cfg(any(windows, test))]
 struct LiveWeightPackets<'a> {
     connection: &'a dyn ConnectionState,
     receiver: &'a Receiver<Notification>,
     observer: &'a mut dyn WeightSessionObserver,
 }
 
+#[cfg(any(windows, test))]
 impl BlockPacketSource for LiveWeightPackets<'_> {
     fn next_block_packet(&mut self, deadline: Instant, _: &str) -> io::Result<Vec<u8>> {
         while self.observer.should_read_weight() {
@@ -237,6 +294,7 @@ impl BlockPacketSource for LiveWeightPackets<'_> {
     }
 }
 
+#[cfg(windows)]
 fn login(
     control: &dyn PacketWriter,
     auth: &dyn PacketWriter,
@@ -254,6 +312,7 @@ fn login(
     login_with_challenge(control, auth, &mut replies, mtu, token, app_random)
 }
 
+#[cfg(any(windows, test))]
 fn login_with_challenge(
     control: &dyn PacketWriter,
     auth: &dyn PacketWriter,
@@ -283,11 +342,13 @@ fn login_with_challenge(
     Ok(keys)
 }
 
+#[cfg(any(windows, test))]
 struct LoginReplies<'a> {
     receiver: &'a Receiver<Notification>,
     accepted: bool,
 }
 
+#[cfg(any(windows, test))]
 impl LoginReplies<'_> {
     fn next(&mut self, deadline: Instant, stage: &str) -> io::Result<Option<Vec<u8>>> {
         let (channel, packet) = read_notification(self.receiver, deadline, stage)?;
@@ -358,12 +419,14 @@ impl LoginReplies<'_> {
     }
 }
 
+#[cfg(any(windows, test))]
 impl BlockPacketSource for LoginReplies<'_> {
     fn next_block_packet(&mut self, deadline: Instant, stage: &str) -> io::Result<Vec<u8>> {
         self.auth_packet(deadline, stage)
     }
 }
 
+#[cfg(any(windows, test))]
 fn read_notification(
     receiver: &Receiver<Notification>,
     deadline: Instant,
@@ -388,6 +451,7 @@ fn read_notification(
     }
 }
 
+#[cfg(any(windows, test))]
 struct LoginKeys {
     device_key: [u8; 16],
     app_key: [u8; 16],
@@ -396,6 +460,7 @@ struct LoginKeys {
     scale_random: [u8; 16],
 }
 
+#[cfg(any(windows, test))]
 impl LoginKeys {
     fn derive(
         token: &ScaleLoginToken,
@@ -442,11 +507,13 @@ impl LoginKeys {
     }
 }
 
+#[cfg(any(windows, test))]
 fn login_mac(key: &[u8; 16]) -> io::Result<HmacSha256> {
     <HmacSha256 as hmac::KeyInit>::new_from_slice(key)
         .map_err(|_| io::Error::other("could not initialize the S200 login authenticator"))
 }
 
+#[cfg(any(windows, test))]
 fn decode_weight(cipher: &WeightCipher, iv: [u8; 4], bytes: &[u8]) -> Option<WeightReading> {
     let (counter, message) = bytes.split_first_chunk::<2>()?;
     let (ciphertext, tag) = message.split_last_chunk::<4>()?;
@@ -465,6 +532,7 @@ fn decode_weight(cipher: &WeightCipher, iv: [u8; 4], bytes: &[u8]) -> Option<Wei
     parse_weight(&plaintext)
 }
 
+#[cfg(any(windows, test))]
 fn parse_weight(plaintext: &[u8]) -> Option<WeightReading> {
     let mut live = None;
     for (index, header) in plaintext.windows(2).enumerate() {
@@ -486,6 +554,7 @@ fn parse_weight(plaintext: &[u8]) -> Option<WeightReading> {
     live.map(WeightReading::Live)
 }
 
+#[cfg(any(windows, test))]
 fn settled_weight(record: &[u8]) -> Option<Weight> {
     let mut fields = std::str::from_utf8(record).ok()?.split(',');
     fields.next()?.parse::<u32>().ok()?;
@@ -496,6 +565,7 @@ fn settled_weight(record: &[u8]) -> Option<Weight> {
     (utc != 0 && fields.next().is_none()).then_some(weight)
 }
 
+#[cfg(any(windows, test))]
 fn measured_weight(raw: u32) -> Option<Weight> {
     (raw > 0 && raw < 30_000).then_some(Weight(raw))
 }

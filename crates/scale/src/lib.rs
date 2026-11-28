@@ -1,7 +1,5 @@
 //! Discovery, weight readings, and GATT service inspection for the Xiaomi Smart Scale S200.
 
-#![cfg(windows)]
-
 mod cloud_sign_in;
 mod diagnostics;
 mod discovery;
@@ -19,6 +17,7 @@ pub mod test_fixtures {
         let control = if registered { 0x59 } else { 0x58 };
         Scale {
             address: BluetoothAddress(address),
+            #[cfg(any(windows, test))]
             address_type: None,
             name: None,
             signal_strength: SignalStrength(-45),
@@ -39,13 +38,16 @@ pub mod test_fixtures {
 }
 
 use std::io;
-use std::marker::PhantomData;
 use std::ops::ControlFlow;
-use std::rc::Rc;
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::{marker::PhantomData, rc::Rc};
+#[cfg(windows)]
 use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatus;
+#[cfg(windows)]
 use windows::Devices::Bluetooth::{BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice};
+#[cfg(windows)]
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
 pub use cloud_sign_in::{
@@ -64,6 +66,7 @@ pub use types::{
     BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight, WeightReading,
 };
 pub use weight::ScaleBindKey;
+#[cfg(windows)]
 use weight::WeightDecoder;
 
 pub const MODEL_NAME: ScaleName<'static> = ScaleName("Xiaomi Smart Scale S200");
@@ -79,12 +82,29 @@ fn check_cancellation(interaction: &mut dyn ScaleSetupInteraction) -> io::Result
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scale {
     address: BluetoothAddress,
-    address_type: Option<BluetoothAddressType>,
+    #[cfg(any(windows, test))]
+    address_type: Option<AddressKind>,
     name: Option<String>,
     signal_strength: SignalStrength,
     connectable: bool,
     weight: Option<Weight>,
     setup_info: Option<ScaleSetupInfo>,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddressKind {
+    Public,
+    #[cfg(windows)]
+    Random,
+}
+
+#[cfg(not(windows))]
+fn bluetooth_unavailable() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Bluetooth connections to the S200 require Windows 10 or 11",
+    )
 }
 
 impl Scale {
@@ -117,12 +137,19 @@ impl Scale {
 
 /// Reports each recognized scale and subsequent changes to its advertisement data.
 /// The observer can end discovery early by returning `ControlFlow::Break`.
+#[cfg(windows)]
 pub fn discover_scales(duration: Duration, observer: &mut dyn ScaleScanObserver) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
     discovery::discover(duration, None, observer)
 }
 
+#[cfg(not(windows))]
+pub fn discover_scales(_: Duration, _: &mut dyn ScaleScanObserver) -> io::Result<()> {
+    Err(bluetooth_unavailable())
+}
+
 /// Discovers scales and reports weights authenticated with the supplied MiBeacon key.
+#[cfg(windows)]
 pub fn discover_scales_with_weight(
     duration: Duration,
     key: &ScaleBindKey,
@@ -132,14 +159,29 @@ pub fn discover_scales_with_weight(
     discovery::discover(duration, Some(WeightDecoder::new(key)), observer)
 }
 
+#[cfg(not(windows))]
+pub fn discover_scales_with_weight(
+    _: Duration,
+    _: &ScaleBindKey,
+    _: &mut dyn ScaleScanObserver,
+) -> io::Result<()> {
+    Err(bluetooth_unavailable())
+}
+
 /// Passively watches for scales until stopped by the caller. An optional bind key enables
 /// authenticated MiBeacon weight readings from the current advertisement.
+#[cfg(windows)]
 pub fn watch_scales(
     key: Option<&ScaleBindKey>,
     observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
     let _apartment = Apartment::initialize()?;
     discovery::watch(key.map(WeightDecoder::new), observer)
+}
+
+#[cfg(not(windows))]
+pub fn watch_scales(_: Option<&ScaleBindKey>, _: &mut dyn ScaleScanObserver) -> io::Result<()> {
+    Err(bluetooth_unavailable())
 }
 
 /// Waits for the first recognized scale that advertises a connection.
@@ -180,6 +222,7 @@ impl ScaleScanObserver for ConnectableScaleSearch {
 }
 
 /// Connects to the scale and returns the UUIDs of its GATT services.
+#[cfg(windows)]
 pub fn read_services(scale: &Scale) -> io::Result<Vec<GattServiceUuid>> {
     let _apartment = Apartment::initialize()?;
     let device = open_scale_device(scale)?;
@@ -192,15 +235,24 @@ pub fn read_services(scale: &Scale) -> io::Result<Vec<GattServiceUuid>> {
 
     let services = result.Services()?;
     (0..services.Size()?)
-        .map(|index| Ok(GattServiceUuid(services.GetAt(index)?.Uuid()?)))
+        .map(|index| Ok(GattServiceUuid(services.GetAt(index)?.Uuid()?.to_u128())))
         .collect()
 }
 
+#[cfg(not(windows))]
+pub fn read_services(_: &Scale) -> io::Result<Vec<GattServiceUuid>> {
+    Err(bluetooth_unavailable())
+}
+
+#[cfg(windows)]
 fn open_scale_device(scale: &Scale) -> io::Result<BluetoothLEDevice> {
     let device = match scale.address_type {
         Some(kind) => BluetoothLEDevice::FromBluetoothAddressWithBluetoothAddressTypeAsync(
             scale.address.0,
-            kind,
+            match kind {
+                AddressKind::Public => BluetoothAddressType::Public,
+                AddressKind::Random => BluetoothAddressType::Random,
+            },
         )?,
         None => BluetoothLEDevice::FromBluetoothAddressAsync(scale.address.0)?,
     }
@@ -209,6 +261,7 @@ fn open_scale_device(scale: &Scale) -> io::Result<BluetoothLEDevice> {
     Ok(device)
 }
 
+#[cfg(windows)]
 fn check_service_status(status: GattCommunicationStatus) -> io::Result<()> {
     match status {
         GattCommunicationStatus::Success => {}
@@ -232,8 +285,10 @@ fn check_service_status(status: GattCommunicationStatus) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 struct Apartment(PhantomData<Rc<()>>);
 
+#[cfg(windows)]
 impl Apartment {
     fn initialize() -> io::Result<Self> {
         // SAFETY: The guard stays on this thread and balances one successful initialization.
@@ -242,6 +297,7 @@ impl Apartment {
     }
 }
 
+#[cfg(windows)]
 impl Drop for Apartment {
     fn drop(&mut self) {
         // SAFETY: This balances one successful RoInitialize on the same thread.
@@ -253,6 +309,7 @@ impl Drop for Apartment {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn reports_gatt_status_and_rejects_unavailable_access() {
         assert!(check_service_status(GattCommunicationStatus::Success).is_ok());

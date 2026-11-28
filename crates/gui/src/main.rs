@@ -1,14 +1,14 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod desktop;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod history;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod scale_setup;
 #[cfg(windows)]
 mod tray;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod weight_plot;
 
 #[cfg(windows)]

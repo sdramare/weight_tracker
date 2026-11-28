@@ -6,27 +6,36 @@ edition.workspace = true
 [features]
 test-fixtures = []
 
-[target.'cfg(windows)'.dependencies]
-aes = "0.9.4"
+[dependencies]
 base64ct = { version = "1.8.3", features = ["alloc"] }
-ccm = { version = "0.6.1", default-features = false }
 getrandom = { version = "0.4.3", features = ["sys_rng"] }
-hkdf = "0.13.0"
-hmac = "0.13.0"
-p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "std"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "cookies", "http2", "native-tls", "system-proxy"] }
+rc4 = { version = "0.2.0", features = ["zeroize"] }
+serde_json = "1.0.154"
 sha1 = { version = "0.11.0", default-features = false }
 sha2 = "0.11.2"
 url = "2.5.9"
+
+[target.'cfg(windows)'.dependencies]
+aes.workspace = true
+ccm.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+p256.workspace = true
 windows = { version = "0.62.2", features = [
-    "Data_Json",
     "Devices_Bluetooth_Advertisement",
     "Devices_Bluetooth_GenericAttributeProfile",
     "Foundation_Collections",
     "Storage_Streams",
-    "Win32_Security_Cryptography",
     "Win32_System_WinRT",
 ] }
+
+[target.'cfg(not(windows))'.dev-dependencies]
+aes.workspace = true
+ccm.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+p256.workspace = true
 
 [lints]
 workspace = true

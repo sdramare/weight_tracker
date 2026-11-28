@@ -7,6 +7,13 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 
+[workspace.dependencies]
+aes = "0.9.4"
+ccm = { version = "0.6.1", default-features = false }
+hkdf = "0.13.0"
+hmac = "0.13.0"
+p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "std"] }
+
 [workspace.lints.clippy]
 panic = "forbid"
 unwrap_used = "forbid"
