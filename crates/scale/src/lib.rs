@@ -3,6 +3,12 @@
 mod cloud_sign_in;
 mod diagnostics;
 mod discovery;
+#[cfg(windows)]
+#[path = "discovery/winrt.rs"]
+mod discovery_source;
+#[cfg(not(windows))]
+#[path = "discovery/unsupported.rs"]
+mod discovery_source;
 mod login_keys;
 mod setup;
 mod types;
@@ -17,7 +23,6 @@ pub mod test_fixtures {
         let control = if registered { 0x59 } else { 0x58 };
         Scale {
             address: BluetoothAddress(address),
-            #[cfg(any(windows, test))]
             address_type: None,
             name: None,
             signal_strength: SignalStrength(-45),
@@ -55,6 +60,8 @@ pub use cloud_sign_in::{
 };
 pub use diagnostics::{SetupCheck, SetupCheckObserver, SetupCheckStatus, check_scale_setup};
 pub use discovery::ScaleScanObserver;
+use discovery::ScanWindow;
+use discovery_source::NativeAdvertisements;
 pub use login_keys::{SavedScaleLogins, ScaleLoginToken, default_registration_directory};
 pub use setup::{
     ConnectedWeightEvent, RegisteredScale, RegistrationEvent, RegistrationObserver,
@@ -66,8 +73,6 @@ pub use types::{
     BluetoothAddress, GattServiceUuid, ScaleName, SignalStrength, Weight, WeightReading,
 };
 pub use weight::ScaleBindKey;
-#[cfg(windows)]
-use weight::WeightDecoder;
 
 pub const MODEL_NAME: ScaleName<'static> = ScaleName("Xiaomi Smart Scale S200");
 
@@ -82,7 +87,6 @@ fn check_cancellation(interaction: &mut dyn ScaleSetupInteraction) -> io::Result
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scale {
     address: BluetoothAddress,
-    #[cfg(any(windows, test))]
     address_type: Option<AddressKind>,
     name: Option<String>,
     signal_strength: SignalStrength,
@@ -91,11 +95,13 @@ pub struct Scale {
     setup_info: Option<ScaleSetupInfo>,
 }
 
-#[cfg(any(windows, test))]
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(dead_code, reason = "reported by Bluetooth sources")
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AddressKind {
     Public,
-    #[cfg(windows)]
     Random,
 }
 
@@ -137,51 +143,35 @@ impl Scale {
 
 /// Reports each recognized scale and subsequent changes to its advertisement data.
 /// The observer can end discovery early by returning `ControlFlow::Break`.
-#[cfg(windows)]
 pub fn discover_scales(duration: Duration, observer: &mut dyn ScaleScanObserver) -> io::Result<()> {
-    let _apartment = Apartment::initialize()?;
-    discovery::discover(duration, None, observer)
-}
-
-#[cfg(not(windows))]
-pub fn discover_scales(_: Duration, _: &mut dyn ScaleScanObserver) -> io::Result<()> {
-    Err(bluetooth_unavailable())
+    scan_scales(ScanWindow::timed(duration)?, None, observer)
 }
 
 /// Discovers scales and reports weights authenticated with the supplied MiBeacon key.
-#[cfg(windows)]
 pub fn discover_scales_with_weight(
     duration: Duration,
     key: &ScaleBindKey,
     observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
-    let _apartment = Apartment::initialize()?;
-    discovery::discover(duration, Some(WeightDecoder::new(key)), observer)
-}
-
-#[cfg(not(windows))]
-pub fn discover_scales_with_weight(
-    _: Duration,
-    _: &ScaleBindKey,
-    _: &mut dyn ScaleScanObserver,
-) -> io::Result<()> {
-    Err(bluetooth_unavailable())
+    scan_scales(ScanWindow::timed(duration)?, Some(key), observer)
 }
 
 /// Passively watches for scales until stopped by the caller. An optional bind key enables
 /// authenticated MiBeacon weight readings from the current advertisement.
-#[cfg(windows)]
 pub fn watch_scales(
     key: Option<&ScaleBindKey>,
     observer: &mut dyn ScaleScanObserver,
 ) -> io::Result<()> {
-    let _apartment = Apartment::initialize()?;
-    discovery::watch(key.map(WeightDecoder::new), observer)
+    scan_scales(ScanWindow::Continuous, key, observer)
 }
 
-#[cfg(not(windows))]
-pub fn watch_scales(_: Option<&ScaleBindKey>, _: &mut dyn ScaleScanObserver) -> io::Result<()> {
-    Err(bluetooth_unavailable())
+fn scan_scales(
+    window: ScanWindow,
+    key: Option<&ScaleBindKey>,
+    observer: &mut dyn ScaleScanObserver,
+) -> io::Result<()> {
+    let source = NativeAdvertisements::start(window.mode())?;
+    discovery::scan(window, source, key, observer)
 }
 
 /// Waits for the first recognized scale that advertises a connection.

@@ -2,39 +2,24 @@ use std::env;
 use std::io;
 use std::str::FromStr;
 
-#[cfg(any(windows, test))]
 use aes::Aes128;
-#[cfg(any(windows, test))]
 use ccm::Ccm;
-#[cfg(any(windows, test))]
 use ccm::aead::{
     AeadInOut, KeyInit,
     consts::{U4, U12},
 };
 
-#[cfg(any(windows, test))]
 use crate::{BluetoothAddress, Weight};
 
 const BIND_KEY_ENV: &str = "S200_BINDKEY";
-#[cfg(any(windows, test))]
 const ENCRYPTED: u16 = 0x0008;
-#[cfg(any(windows, test))]
 const HAS_MAC: u16 = 0x0010;
-#[cfg(any(windows, test))]
 const HAS_CAPABILITY: u16 = 0x0020;
-#[cfg(any(windows, test))]
 const HAS_OBJECT: u16 = 0x0040;
-#[cfg(any(windows, test))]
 const WEIGHT_OBJECT: u16 = 0x4e16;
 
 /// The 16-byte MiBeacon key for an S200 bound to Xiaomi Home.
-pub struct ScaleBindKey(
-    #[cfg_attr(
-        not(any(windows, test)),
-        allow(dead_code, reason = "used by Bluetooth decoding")
-    )]
-    [u8; 16],
-);
+pub struct ScaleBindKey([u8; 16]);
 
 impl ScaleBindKey {
     /// Loads the key from the current process's S200_BINDKEY environment variable.
@@ -74,10 +59,8 @@ fn invalid_key() -> io::Error {
     )
 }
 
-#[cfg(any(windows, test))]
 pub(super) struct WeightDecoder(Ccm<Aes128, U4, U12>);
 
-#[cfg(any(windows, test))]
 impl WeightDecoder {
     pub(super) fn new(key: &ScaleBindKey) -> Self {
         Self(Ccm::new((&key.0).into()))
@@ -151,7 +134,6 @@ impl WeightDecoder {
     }
 }
 
-#[cfg(any(windows, test))]
 fn weight_object(mut objects: &[u8]) -> Option<Weight> {
     while let [id_low, id_high, length, body @ ..] = objects {
         let (value, rest) = body.split_at_checked(usize::from(*length))?;

@@ -183,7 +183,7 @@
         <div class="diagram" role="region" aria-label="Scrollable scale recognition diagram" tabindex="0">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 246" role="img" aria-labelledby="match-title match-description">
             <title id="match-title">S200 recognition for the desktop and terminal apps</title>
-            <desc id="match-description">The shared library recognizes the S200 by its Bluetooth name or the S200 product ID in Xiaomi MiBeacon service or manufacturer data. The desktop app lists every recognized address. The terminal app waits for a connectable advertisement from the same address and then connects. Identification and connectability can arrive in separate packets.</desc>
+            <desc id="match-description">The Windows adapter reads advertisements from WinRT and passes their names, addresses, and payload bytes to shared discovery. Discovery recognizes the S200 by its Bluetooth name or the S200 product ID in Xiaomi MiBeacon service or manufacturer data. The desktop app lists every recognized address. The terminal app waits for a connectable advertisement from the same address and then connects. Identification and connectability can arrive in separate packets.</desc>
             <defs>
               <marker id="match-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
                 <path d="M0 0L9 4L0 8Z" fill="#116650"/>
@@ -220,9 +220,9 @@
         <figcaption>Windows can deliver identification and connectability in separate packets. The app combines them when both use the same Bluetooth address.</figcaption>
       </figure>
       <ol class="steps">
-        <li><strong>Start a WinRT advertisement watcher.</strong> The desktop monitors passively, so its watcher sends no scan requests. Setup and timed CLI scans use active scanning to collect scan responses. Both modes listen for legacy and extended advertisements. Skip address zero (anonymous) and a received signal strength of <code>−127 dBm</code> (stale or out of range).</li>
-        <li><strong>Recognize an S200.</strong> Match a case-insensitive name prefix from the diagram or read the MiBeacon header. Advertisement data type <code>0x16</code> carries 16-bit service data. Its Xiaomi header starts with <code>95 FE</code>, the little-endian encoding of the <code>FE95</code> service UUID, followed by the 16-bit control word and product ID in little-endian order. If the service header is missing, check manufacturer data for Xiaomi’s company ID (<code>0x038F</code>), where the same control and product fields start at the first byte. The app recognizes product IDs <code>0x45C9</code>, <code>0x4C04</code>, and <code>0x4DCB</code> (ms113).</li>
+        <li><strong>Read advertisements through the Windows adapter.</strong> Shared discovery selects passive mode for desktop monitoring and active mode for setup and timed CLI scans. The WinRT watcher listens for legacy and extended advertisements. The adapter skips address zero (anonymous) and <code>−127 dBm</code> (stale or out of range), then delivers raw payload bytes and Bluetooth metadata through <code>AdvertisementSource</code>.</li>
         <li><strong>Determine connectability.</strong> Directed and undirected connectable advertisements qualify. An extended advertisement qualifies when Windows sets <code>IsConnectable</code>.</li>
+        <li><strong>Recognize an S200.</strong> Match a case-insensitive name prefix from the diagram or read the MiBeacon header. Advertisement data type <code>0x16</code> carries 16-bit service data. Its Xiaomi header starts with <code>95 FE</code>, the little-endian encoding of the <code>FE95</code> service UUID, followed by the 16-bit control word and product ID in little-endian order. If the service header is missing, check manufacturer data for Xiaomi’s company ID (<code>0x038F</code>), where the same control and product fields start at the first byte. The app recognizes product IDs <code>0x45C9</code>, <code>0x4C04</code>, and <code>0x4DCB</code> (ms113).</li>
         <li><strong>Merge by address.</strong> Keep the most recent signal and any new name, address type, setup info, or decoded weight. Recognition and connectability stay set for the lifetime of the candidate. Emit recognized candidates when those fields change. In continuous mode, also report each current connection offer and freshly decoded weight, and prune stale candidates every 30 seconds.</li>
       </ol>
       <div class="fields" role="region" aria-label="MiBeacon setup flags" tabindex="0">
@@ -237,7 +237,8 @@
           </tbody>
         </table>
       </div>
-      <p class="source"><a href="../crates/scale/src/discovery.rs">Advertisement watcher</a> · <a href="../crates/scale/src/setup.rs">Setup flag decoding</a> · <a href="https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.advertisement.bluetoothlescanningmode">Windows scanning modes</a></p>
+      <p>Linux and Windows tests feed raw advertisements through the same discovery loop. Windows also checks how the adapter extracts fields from WinRT.</p>
+      <p class="source"><a href="../crates/scale/src/discovery.rs">Shared discovery</a> · <a href="../crates/scale/src/discovery/winrt.rs">Windows advertisement adapter</a> · <a href="../crates/scale/src/setup.rs">Setup flag decoding</a> · <a href="https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.advertisement.bluetoothlescanningmode">Windows scanning modes</a></p>
     </section>
 
     <section class="panel" aria-labelledby="weight-heading">
